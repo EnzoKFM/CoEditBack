@@ -21,6 +21,7 @@ services:
     environment:
       PORT: 3000
       CLIENT_URL: ${CLIENT_URL:-http://localhost:5173}
+      JWT_SECRET: ${JWT_SECRET}
       DB_HOST: mysql
       DB_PORT: 3306
       DB_USER: root

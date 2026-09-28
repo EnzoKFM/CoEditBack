@@ -11,3 +11,4 @@ if (testDatabaseName === applicationDatabaseName) {
 }
 
 process.env.DB_NAME = testDatabaseName;
+process.env.JWT_SECRET ??= 'secret-de-test-uniquement';
