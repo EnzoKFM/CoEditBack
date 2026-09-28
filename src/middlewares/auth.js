@@ -1,5 +1,5 @@
 import { HttpError } from '../errors/HttpError.js';
-import { AUTH_COOKIE, clearAuthCookie, verifyToken } from '../lib/auth.js';
+import { AUTH_COOKIE, clearAuthCookie, verifySessionToken } from '../lib/sessionCookie.js';
 import { findUserById, toUserResponse } from '../services/userService.js';
 
 // Vérification si l'utilisateur est authentifié, compte non bloqué et token version valide
@@ -11,7 +11,7 @@ export async function requireAuth(request, response, next) {
 
   let tokenPayload;
   try {
-    tokenPayload = verifyToken(token);
+    tokenPayload = verifySessionToken(token);
   } catch {
     clearAuthCookie(response);
     throw new HttpError(401, 'Session invalide ou expirée');
