@@ -1,6 +1,5 @@
 import { TOKEN_TYPES, cookieOptions, signJwt, verifyJwt } from './jwt.js';
 
-
 // Nom du cookie temporaire posé entre le mot de passe et le code 2FA
 export const PENDING_2FA_COOKIE = 'pending_2fa';
 

@@ -20,7 +20,6 @@ import { validateLoginBody, validateTotpCode } from '../validators/authValidator
 // même que pour un vrai compte, ce qui empêche de deviner les emails existants.
 const DUMMY_PASSWORD_HASH = '$2b$12$umFTmtB2I659an.uxEBqxeF9LQAw1b1WLZd464iZoHH5Amqhm58e.';
 
-
 // Connexion d'un utilisateur
 export async function login(request, response) {
   const { email, password } = validateLoginBody(request.body);
@@ -44,7 +43,6 @@ export async function login(request, response) {
   setAuthCookie(response, user);
   response.json({ user: toUserResponse(user) });
 }
-
 
 // Deuxième étape de connexion : vérification du code 2FA
 export async function loginWithTwoFactor(request, response) {
@@ -74,7 +72,6 @@ export async function loginWithTwoFactor(request, response) {
   response.json({ user: toUserResponse(user) });
 }
 
-
 // Déconnexion d'un utilisateur.
 // Effacer le cookie ne suffit pas : une copie du token resterait valable 8 h.
 // On incrémente donc token_version, ce qui invalide tous les tokens déjà émis (sur tous les appareils).
@@ -93,7 +90,6 @@ export async function logout(request, response) {
   clearPending2faCookie(response);
   response.status(204).end();
 }
-
 
 // Récupère l'utilisateur actuel
 export function getCurrentUser(request, response) {
