@@ -218,23 +218,32 @@ export async function getFileContent(fileId) {
   return { content: fileRow.content, version: fileRow.version, updatedAt: fileRow.updated_at };
 }
 
-export async function saveFileContent(fileId, { content, version }) {
-  const [updateResult] = await pool.query(
+export async function findFileDocument(fileId) {
+  const [fileRows] = await pool.query(
+    `SELECT file_content.content, file_content.revision
+     FROM file_contents AS file_content
+     JOIN nodes AS node ON node.id = file_content.node_id
+     WHERE node.id = ? AND node.type = 'file'`,
+    [fileId],
+  );
+
+  const fileRow = fileRows[0];
+  if (!fileRow) {
+    return null;
+  }
+  return { content: fileRow.content, revision: fileRow.revision };
+}
+
+export async function storeFileDocument(fileId, { content, revision }) {
+  await pool.query(
     `UPDATE file_contents AS file_content
      JOIN nodes AS node ON node.id = file_content.node_id
      SET file_content.content = ?,
+         file_content.revision = ?,
          file_content.version = file_content.version + 1,
          file_content.updated_at = CURRENT_TIMESTAMP,
          node.updated_at = CURRENT_TIMESTAMP
-     WHERE file_content.node_id = ? AND file_content.version = ?`,
-    [content, fileId, version],
+     WHERE file_content.node_id = ?`,
+    [content, revision, fileId],
   );
-
-  if (updateResult.affectedRows === 0) {
-    const currentFile = await getFileContent(fileId);
-    throw new HttpError(409, 'Le document a été modifié entre-temps', { currentVersion: currentFile.version });
-  }
-
-  const { version: savedVersion, updatedAt } = await getFileContent(fileId);
-  return { version: savedVersion, updatedAt };
 }

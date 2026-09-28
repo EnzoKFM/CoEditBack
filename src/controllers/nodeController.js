@@ -6,7 +6,6 @@ import {
   validateContent,
   validateNodeName,
   validateNodeType,
-  validateVersion,
 } from '../validators/nodeValidator.js';
 
 export async function listRootChildren(request, response) {
@@ -62,14 +61,4 @@ export async function deleteNode(request, response) {
 export async function getFileContent(request, response) {
   const fileId = parseNodeId(request.params.fileId);
   response.json(await nodeService.getFileContent(fileId));
-}
-
-export async function saveFileContent(request, response) {
-  const fileId = parseNodeId(request.params.fileId);
-  const requestBody = request.body ?? {};
-  const savedFile = await nodeService.saveFileContent(fileId, {
-    content: validateContent(requestBody.content),
-    version: validateVersion(requestBody.version),
-  });
-  response.json(savedFile);
 }

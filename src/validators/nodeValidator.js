@@ -49,10 +49,3 @@ export function validateContent(rawContent) {
   }
   return rawContent;
 }
-
-export function validateVersion(rawVersion) {
-  if (!Number.isInteger(rawVersion) || rawVersion <= 0) {
-    throw new HttpError(400, 'La version doit être un entier positif');
-  }
-  return rawVersion;
-}
