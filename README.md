@@ -1,6 +1,6 @@
 # CoEditBack
 
-API de CoEdit : stockage de documents texte rangés dans une arborescence de dossiers, et co-édition de ces documents en temps réel.
+API de CoEdit : authentification et stockage de documents texte rangés dans une arborescence de dossiers, en vue de leur co-édition en temps réel.
 
 ## Démarrage (Docker)
 
