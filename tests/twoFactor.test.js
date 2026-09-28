@@ -23,14 +23,20 @@ afterAll(async () => {
   await closeDatabase();
 });
 
+// Code du créneau de 30 s précédent : accepté grâce à la tolérance, il laisse le code
+// du créneau actuel disponible pour la suite du test (un code ne sert qu'une fois)
+async function generatePreviousCode(secret) {
+  return generate({ secret, epoch: Math.floor(Date.now() / 1000) - 30 });
+}
+
 // Connecte un agent (qui garde ses cookies) et active la 2FA ; renvoie l'agent et le secret
 async function loginAndEnableTwoFactor() {
   const agent = request.agent(app);
   await agent.post('/api/auth/login').send(TEST_USER);
 
-  const setupResponse = await agent.post('/api/users/me/2fa/setup');
+  const setupResponse = await agent.post('/api/users/me/2fa/setup').send({ password: TEST_USER.password });
   const { secret } = setupResponse.body;
-  await agent.post('/api/users/me/2fa/enable').send({ code: await generate({ secret }) });
+  await agent.post('/api/users/me/2fa/enable').send({ code: await generatePreviousCode(secret) });
 
   return { agent, secret };
 }
@@ -41,11 +47,34 @@ describe('activation de la 2FA', () => {
     expect(setupResponse.status).toBe(401);
   });
 
+  it('exige le mot de passe pour générer le QR code', async () => {
+    const agent = request.agent(app);
+    await agent.post('/api/auth/login').send(TEST_USER);
+
+    const withoutPasswordResponse = await agent.post('/api/users/me/2fa/setup').send({});
+    const wrongPasswordResponse = await agent.post('/api/users/me/2fa/setup').send({ password: 'mauvais' });
+    expect(withoutPasswordResponse.status).toBe(400);
+    expect(wrongPasswordResponse.status).toBe(400);
+
+    const [userRows] = await pool.execute('SELECT totp_secret FROM users WHERE email = ?', [TEST_USER.email]);
+    expect(userRows[0].totp_secret).toBeNull();
+  });
+
+  it('stocke le secret chiffré, jamais en clair', async () => {
+    const agent = request.agent(app);
+    await agent.post('/api/auth/login').send(TEST_USER);
+    const { secret } = (await agent.post('/api/users/me/2fa/setup').send({ password: TEST_USER.password })).body;
+
+    const [userRows] = await pool.execute('SELECT totp_secret FROM users WHERE email = ?', [TEST_USER.email]);
+    expect(userRows[0].totp_secret).toBeTruthy();
+    expect(userRows[0].totp_secret).not.toContain(secret);
+  });
+
   it('renvoie un QR code et un secret, sans activer la 2FA', async () => {
     const agent = request.agent(app);
     await agent.post('/api/auth/login').send(TEST_USER);
 
-    const setupResponse = await agent.post('/api/users/me/2fa/setup');
+    const setupResponse = await agent.post('/api/users/me/2fa/setup').send({ password: TEST_USER.password });
     expect(setupResponse.status).toBe(200);
     expect(setupResponse.body.qrCode).toMatch(/^data:image\/png;base64,/);
     expect(setupResponse.body.secret).toMatch(/^[A-Z2-7]+$/);
@@ -57,7 +86,7 @@ describe('activation de la 2FA', () => {
   it('refuse un code incorrect', async () => {
     const agent = request.agent(app);
     await agent.post('/api/auth/login').send(TEST_USER);
-    await agent.post('/api/users/me/2fa/setup');
+    await agent.post('/api/users/me/2fa/setup').send({ password: TEST_USER.password });
 
     const enableResponse = await agent.post('/api/users/me/2fa/enable').send({ code: '000000' });
     expect(enableResponse.status).toBe(400);
@@ -66,7 +95,7 @@ describe('activation de la 2FA', () => {
   it('refuse un code mal formé', async () => {
     const agent = request.agent(app);
     await agent.post('/api/auth/login').send(TEST_USER);
-    await agent.post('/api/users/me/2fa/setup');
+    await agent.post('/api/users/me/2fa/setup').send({ password: TEST_USER.password });
 
     const enableResponse = await agent.post('/api/users/me/2fa/enable').send({ code: '12ab' });
     expect(enableResponse.status).toBe(400);
@@ -91,7 +120,7 @@ describe('activation de la 2FA', () => {
   it('refuse de régénérer un secret quand la 2FA est déjà active', async () => {
     const { agent } = await loginAndEnableTwoFactor();
 
-    const setupResponse = await agent.post('/api/users/me/2fa/setup');
+    const setupResponse = await agent.post('/api/users/me/2fa/setup').send({ password: TEST_USER.password });
     expect(setupResponse.status).toBe(409);
   });
 });
@@ -137,6 +166,32 @@ describe('connexion avec la 2FA', () => {
     const codeResponse = await request(app)
       .post('/api/auth/login/2fa')
       .send({ code: await generate({ secret }) });
+    expect(codeResponse.status).toBe(401);
+  });
+
+  it('refuse de réutiliser un code déjà accepté', async () => {
+    const { secret } = await loginAndEnableTwoFactor();
+    const currentCode = await generate({ secret });
+
+    const firstAgent = request.agent(app);
+    await firstAgent.post('/api/auth/login').send(TEST_USER);
+    const firstCodeResponse = await firstAgent.post('/api/auth/login/2fa').send({ code: currentCode });
+    expect(firstCodeResponse.status).toBe(200);
+
+    const replayAgent = request.agent(app);
+    await replayAgent.post('/api/auth/login').send(TEST_USER);
+    const replayCodeResponse = await replayAgent.post('/api/auth/login/2fa').send({ code: currentCode });
+    expect(replayCodeResponse.status).toBe(401);
+  });
+
+  it('refuse le cookie temporaire si les sessions ont été révoquées entre-temps', async () => {
+    const { secret } = await loginAndEnableTwoFactor();
+    const agent = request.agent(app);
+    await agent.post('/api/auth/login').send(TEST_USER);
+
+    await pool.execute('UPDATE users SET token_version = token_version + 1 WHERE email = ?', [TEST_USER.email]);
+
+    const codeResponse = await agent.post('/api/auth/login/2fa').send({ code: await generate({ secret }) });
     expect(codeResponse.status).toBe(401);
   });
 

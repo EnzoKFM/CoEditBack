@@ -1,15 +1,29 @@
 import bcrypt from 'bcryptjs';
 import { HttpError } from '../errors/HttpError.js';
-import { buildTotpQrCode, createTotpSecret, isTotpCodeValid } from '../lib/totp.js';
-import { disableTotp, enableTotp, findUserById, saveTotpSecret, toUserResponse } from '../services/userService.js';
+import { buildTotpQrCode, createTotpSecret } from '../lib/totp.js';
+import {
+  consumeTotpCode,
+  disableTotp,
+  enableTotp,
+  findUserById,
+  saveTotpSecret,
+  toUserResponse,
+} from '../services/userService.js';
 import { validatePassword, validateTotpCode } from '../validators/authValidator.js';
 
 // Étape 1 de l'activation : génère un secret et renvoie le QR code à scanner.
 // La 2FA n'est pas encore active tant que l'utilisateur n'a pas confirmé un code.
+// Le mot de passe est exigé : sinon, avec une session volée, un attaquant pourrait
+// activer la 2FA avec son propre téléphone et bloquer le vrai propriétaire du compte.
 export async function setupTwoFactor(request, response) {
+  const password = validatePassword(request.body?.password);
+
   const user = await findUserById(request.user.id);
   if (user.totp_enabled) {
     throw new HttpError(409, 'La double authentification est déjà activée');
+  }
+  if (!(await bcrypt.compare(password, user.password_hash))) {
+    throw new HttpError(400, 'Mot de passe incorrect');
   }
 
   const secret = createTotpSecret();
@@ -30,7 +44,7 @@ export async function enableTwoFactor(request, response) {
   if (!user.totp_secret) {
     throw new HttpError(400, "Générez d'abord le QR code");
   }
-  if (!(await isTotpCodeValid(user.totp_secret, code))) {
+  if (!(await consumeTotpCode(user, code))) {
     throw new HttpError(400, 'Code incorrect');
   }
 
@@ -50,7 +64,7 @@ export async function disableTwoFactor(request, response) {
 
   // 400 et non 401 : l'utilisateur est bien connecté, c'est la saisie qui est fausse
   const passwordMatches = await bcrypt.compare(password, user.password_hash);
-  if (!passwordMatches || !(await isTotpCodeValid(user.totp_secret, code))) {
+  if (!passwordMatches || !(await consumeTotpCode(user, code))) {
     throw new HttpError(400, 'Mot de passe ou code incorrect');
   }
 

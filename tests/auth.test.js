@@ -111,15 +111,38 @@ describe('POST /api/auth/logout', () => {
     const meResponse = await agent.get('/api/auth/me');
     expect(meResponse.status).toBe(401);
   });
+
+  it('révoque le token côté serveur : une copie du cookie ne fonctionne plus', async () => {
+    const loginResponse = await loginAs(TEST_USER);
+    const copiedSessionCookie = loginResponse.headers['set-cookie'][0].split(';')[0];
+
+    await request(app).post('/api/auth/logout').set('Cookie', copiedSessionCookie);
+
+    const replayResponse = await request(app).get('/api/auth/me').set('Cookie', copiedSessionCookie);
+    expect(replayResponse.status).toBe(401);
+  });
 });
 
-// En dernier : le limiteur compte aussi les échecs des tests précédents.
+// En dernier : le limiteur par IP compte aussi les échecs des tests précédents.
 describe('limitation des tentatives de connexion', () => {
-  it('renvoie 429 après trop d\'échecs', async () => {
+  it("renvoie 429 après trop d'échecs sur un même compte, sans bloquer les autres comptes", async () => {
+    const attackedAccount = { email: 'cible@coedit.test', password: 'faux' };
+    await pool.execute('DELETE FROM users WHERE email = ?', [attackedAccount.email]);
+    await pool.execute('INSERT INTO users (email, password_hash, first_name, last_name) VALUES (?, ?, ?, ?)', [
+      attackedAccount.email,
+      await bcrypt.hash('MotDePasse123!', 4),
+      'Cible',
+      'Test',
+    ]);
     let lastStatus;
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      lastStatus = (await loginAs({ ...TEST_USER, password: 'faux' })).status;
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      lastStatus = (await loginAs(attackedAccount)).status;
     }
     expect(lastStatus).toBe(429);
+
+    const otherAccountResponse = await loginAs(TEST_USER);
+    expect(otherAccountResponse.status).toBe(200);
+
+    await pool.execute('DELETE FROM users WHERE email = ?', [attackedAccount.email]);
   });
 });

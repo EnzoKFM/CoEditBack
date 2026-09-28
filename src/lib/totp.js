@@ -19,12 +19,13 @@ export async function buildTotpQrCode(email, secret) {
   return QRCode.toDataURL(otpauthUri);
 }
 
-// Vérifie un code à 6 chiffres pour un secret donné
-export async function isTotpCodeValid(secret, code) {
+// Vérifie un code à 6 chiffres pour un secret donné.
+// Renvoie le créneau de 30 s du code (pour empêcher de le rejouer), ou null si le code est faux.
+export async function findTotpTimeStep(secret, code) {
   try {
     const result = await verify({ secret, token: code, epochTolerance: EPOCH_TOLERANCE_SECONDS });
-    return result.valid;
+    return result.valid ? result.timeStep : null;
   } catch {
-    return false;
+    return null;
   }
 }

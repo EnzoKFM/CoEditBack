@@ -6,8 +6,11 @@ CREATE TABLE IF NOT EXISTS users (
   last_name VARCHAR(100) NOT NULL,
   role ENUM('user', 'admin') NOT NULL DEFAULT 'user',
   is_blocked BOOLEAN NOT NULL DEFAULT FALSE,
-  totp_secret VARCHAR(64) NULL,
+  -- Secret chiffré (AES-256-GCM, clé TOTP_ENCRYPTION_KEY), jamais en clair
+  totp_secret VARCHAR(255) NULL,
   totp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Dernier créneau de 30 s accepté : un code déjà utilisé ne peut pas être rejoué
+  totp_last_time_step BIGINT UNSIGNED NULL,
   -- Incrémenté au changement de mot de passe : invalide les sessions existantes
   token_version INT UNSIGNED NOT NULL DEFAULT 0,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

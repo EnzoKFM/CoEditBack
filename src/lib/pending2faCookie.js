@@ -12,9 +12,10 @@ export function verifyPending2faToken(token) {
   return verifyJwt(token, TOKEN_TYPES.pending2fa);
 }
 
-// Cookie temporaire : mot de passe validé, en attente du code 2FA
+// Cookie temporaire : mot de passe validé, en attente du code 2FA.
+// tv (token_version) le rend invalide si le mot de passe change ou si les sessions sont révoquées entre-temps.
 export function setPending2faCookie(response, user) {
-  const token = signJwt({ userId: user.id }, TOKEN_TYPES.pending2fa, PENDING_2FA_DURATION_MS);
+  const token = signJwt({ userId: user.id, tv: user.token_version }, TOKEN_TYPES.pending2fa, PENDING_2FA_DURATION_MS);
   response.cookie(PENDING_2FA_COOKIE, token, { ...cookieOptions, maxAge: PENDING_2FA_DURATION_MS });
 }
 

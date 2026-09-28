@@ -21,7 +21,10 @@ services:
     environment:
       PORT: 3000
       CLIENT_URL: ${CLIENT_URL:-http://localhost:5173}
+      NODE_ENV: ${NODE_ENV:-development}
+      TRUST_PROXY: ${TRUST_PROXY:-}
       JWT_SECRET: ${JWT_SECRET}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY}
       DB_HOST: mysql
       DB_PORT: 3306
       DB_USER: root

@@ -33,7 +33,10 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 |---|---|
 | `PORT` | Port de l'API (3000) |
 | `CLIENT_URL` | Origine autorisée par CORS (front) |
-| `JWT_SECRET` | Clé de signature des sessions, **obligatoire**, propre à chaque environnement |
+| `NODE_ENV` | `development` en local ; `production` ajoute l'attribut `Secure` aux cookies (HTTPS obligatoire) |
+| `TRUST_PROXY` | Nombre de reverse proxies devant l'API (ex. `1` derrière Traefik ou Nginx), vide sinon. Sans lui derrière un proxy, tous les visiteurs partagent la même IP pour la limitation des tentatives |
+| `JWT_SECRET` | Clé de signature des sessions, **obligatoire, au moins 32 caractères**, propre à chaque environnement |
+| `TOTP_ENCRYPTION_KEY` | Clé de chiffrement des secrets 2FA, **obligatoire, 64 caractères hexadécimaux**. La changer rend inutilisables les 2FA déjà activées |
 | `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD` | Connexion MySQL (forcées par `docker-compose.yml` dans le conteneur) |
 | `DB_NAME` | Base applicative |
 | `DB_TEST_NAME` | Base des tests |
@@ -41,7 +44,7 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 
 ## Modèle de données
 
-- `users` : comptes (`role` = `user` | `admin`), mot de passe haché avec bcrypt. `is_blocked` empêche la connexion et la navigation sur le site; `token_version` invalide les sessions ouvertes quand il est incrémenté (changement de mot de passe). `totp_secret` et `totp_enabled` sont réservés à la 2FA.
+- `users` : comptes (`role` = `user` | `admin`), mot de passe haché avec bcrypt. `is_blocked` empêche la connexion et la navigation sur le site; `token_version` invalide les sessions ouvertes quand il est incrémenté (déconnexion, changement de mot de passe). 2FA : `totp_secret` (chiffré en AES-256-GCM, jamais en clair), `totp_enabled`, et `totp_last_time_step` (dernier créneau de 30 s accepté, pour qu'un code ne serve qu'une fois).
 - `nodes` : dossiers et fichiers (`type` = `folder` | `file`), rattachés à leur parent par `parent_id` (`NULL` = racine). Deux éléments d'un même dossier ne peuvent pas porter le même nom (comparaison insensible à la casse, sensible aux accents). `owner_id` est réservé à la future authentification.
 - `file_contents` : texte du document (`content`), `revision` (nombre d'opérations appliquées, voir la collaboration) et `version` (incrémentée à chaque sauvegarde).
 
@@ -57,12 +60,20 @@ La session est un JWT placé dans un cookie `token` (`HttpOnly`, `SameSite=Stric
 |---|---|---|---|
 | POST | `/api/auth/login` | `{ email, password }` | `{ user }` + cookie ; si 2FA active : `{ twoFactorRequired: true }` ; 401 identifiants incorrects, 403 compte bloqué |
 | POST | `/api/auth/login/2fa` | `{ code }` | `{ user }` + cookie ; 401 code incorrect ou délai de 5 min dépassé |
-| POST | `/api/auth/logout` | | 204, cookie supprimé |
+| POST | `/api/auth/logout` | | 204 ; cookie supprimé et **toutes les sessions de l'utilisateur révoquées** (`token_version` + 1), sur tous ses appareils |
 | GET | `/api/auth/me` | | `{ user }` ; 401 sans session valide |
 
 `user` vaut `{ id, email, firstName, lastName, role, totpEnabled }`.
 
-`/login`, `/login/2fa` et la désactivation de la 2FA partagent une limite de 10 échecs par IP toutes les 15 minutes, puis renvoient 429 ; les requêtes réussies ne sont pas comptées. En développement, redémarrer l'API (`rs` dans nodemon) remet le compteur à zéro.
+Limitation des tentatives (seuls les échecs comptent, fenêtre de 15 minutes, puis 429) :
+
+| Route | Limite |
+|---|---|
+| `/login` | 20 échecs par IP, et 10 échecs par compte (email), quelle que soit l'IP |
+| `/login/2fa` | 10 échecs par IP |
+| `/2fa/setup`, `/2fa/disable` | 10 échecs par utilisateur connecté |
+
+La limite par compte bloque aussi son propriétaire pendant 15 minutes : c'est la contrepartie de la protection contre une attaque répartie sur plusieurs IP. En développement, redémarrer l'API (`rs` dans nodemon) remet les compteurs à zéro.
 
 ### Double authentification (TOTP)
 
@@ -70,15 +81,17 @@ Compatible Google Authenticator, Authy, Microsoft Authenticator… Routes réser
 
 | Méthode | Route | Corps | Réponse |
 |---|---|---|---|
-| POST | `/api/users/me/2fa/setup` | | `{ qrCode, secret }` : QR code (data URL pour un `<img>`) et secret pour une saisie manuelle. La 2FA n'est pas encore active ; 409 si elle l'est déjà |
+| POST | `/api/users/me/2fa/setup` | `{ password }` | `{ qrCode, secret }` : QR code (data URL pour un `<img>`) et secret pour une saisie manuelle. La 2FA n'est pas encore active ; 400 si le mot de passe est incorrect, 409 si la 2FA est déjà active |
 | POST | `/api/users/me/2fa/enable` | `{ code }` | `{ user }` ; active la 2FA si le code est valide, 400 sinon |
 | POST | `/api/users/me/2fa/disable` | `{ password, code }` | `{ user }` ; 400 si le mot de passe ou le code est incorrect |
 
-Connexion d'un compte avec 2FA : `/login` vérifie le mot de passe et pose un cookie temporaire `pending_2fa` (5 min), qui n'ouvre pas de session ; `/login/2fa` vérifie le code et pose le vrai cookie de session. Le code est accepté avec une tolérance de 30 s, et les espaces sont ignorés.
+Connexion d'un compte avec 2FA : `/login` vérifie le mot de passe et pose un cookie temporaire `pending_2fa` (5 min), qui n'ouvre pas de session ; `/login/2fa` vérifie le code et pose le vrai cookie de session. Le cookie temporaire devient invalide si les sessions de l'utilisateur sont révoquées entre-temps. Le code est accepté avec une tolérance de 30 s, les espaces sont ignorés, et **un code ne sert qu'une fois** (connexion, activation et désactivation confondues).
 
 Pour protéger une route : `requireAuth` (401 si non connecté, expose `request.user`) et `requireAdmin` (403 si non admin), dans `src/middlewares/auth.js`. Un compte bloqué perd sa session dès la requête suivante.
 
 ### Documents
+
+Toutes les routes de documents exigent une session (401 sinon).
 
 | Méthode | Route | Corps | Réponse |
 |---|---|---|---|
@@ -116,6 +129,8 @@ Pour protéger une route : `requireAuth` (401 si non connecté, expose `request.
 ## Collaboration temps réel
 
 La synchronisation repose sur une transformation opérationnelle (OT) écrite pour le projet, sans Yjs. Le transport est [Socket.IO](https://socket.io), sur le même port que l'API (`http://localhost:3000`, chemin par défaut `/socket.io`). Le serveur fait autorité : il ordonne les opérations, les transforme, les applique, puis les diffuse.
+
+La connexion exige une session : le serveur lit le cookie `token` à l'ouverture et la refuse (`connect_error` « Non authentifié ») s'il est absent, invalide ou révoqué, ou si le compte est bloqué. Le front, qui n'est pas sur la même origine que l'API, doit ouvrir le socket avec `withCredentials: true` pour que le navigateur envoie le cookie.
 
 ### Opérations
 

@@ -15,12 +15,21 @@ export const cookieOptions = {
   path: '/',
 };
 
+// Longueur minimale du secret JWT pour éviter les attaques par force brute
+const JWT_SECRET_MIN_LENGTH = 32;
+
 // Clé secrète pour le token JWT
 function getJwtSecret() {
-  if (!process.env.JWT_SECRET) {
-    throw new Error('JWT_SECRET manquant dans le .env');
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret || jwtSecret.length < JWT_SECRET_MIN_LENGTH) {
+    throw new Error(`JWT_SECRET doit contenir au moins ${JWT_SECRET_MIN_LENGTH} caractères (voir .env.example)`);
   }
-  return process.env.JWT_SECRET;
+  return jwtSecret;
+}
+
+// Vérifié au démarrage du serveur si le secret est correct
+export function checkJwtSecret() {
+  getJwtSecret();
 }
 
 // Génère un token JWT du type demandé, valable durationMs

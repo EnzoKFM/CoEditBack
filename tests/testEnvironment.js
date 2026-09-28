@@ -11,4 +11,5 @@ if (testDatabaseName === applicationDatabaseName) {
 }
 
 process.env.DB_NAME = testDatabaseName;
-process.env.JWT_SECRET ??= 'secret-de-test-uniquement';
+process.env.JWT_SECRET ||= 'secret-de-test-uniquement-assez-long-pour-le-controle';
+process.env.TOTP_ENCRYPTION_KEY ||= '0'.repeat(64);

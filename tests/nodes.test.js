@@ -1,22 +1,44 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/app.js';
+import { createAuthenticatedAgent, deleteTestUser } from './authHelper.js';
 import { closeDatabase, resetDatabase } from './databaseHelper.js';
 
+const NODES_TEST_EMAIL = 'nodes@coedit.test';
+let authenticatedAgent;
+
+beforeAll(async () => {
+  authenticatedAgent = await createAuthenticatedAgent(NODES_TEST_EMAIL);
+});
 beforeEach(resetDatabase);
-afterAll(closeDatabase);
+afterAll(async () => {
+  await deleteTestUser(NODES_TEST_EMAIL);
+  await closeDatabase();
+});
+
+describe('authentification requise', () => {
+  it.each([
+    ['GET', '/api/folders/root/children'],
+    ['POST', '/api/nodes'],
+    ['GET', '/api/nodes/1'],
+    ['GET', '/api/files/1/content'],
+  ])('%s %s renvoie 401 sans session', async (method, path) => {
+    const anonymousResponse = await request(app)[method.toLowerCase()](path).send({ type: 'folder', name: 'poc' });
+    expect(anonymousResponse.status).toBe(401);
+  });
+});
 
 async function createFolder(name, parentId = null) {
-  return request(app).post('/api/nodes').send({ type: 'folder', name, parentId });
+  return authenticatedAgent.post('/api/nodes').send({ type: 'folder', name, parentId });
 }
 
 async function createFile(name, parentId = null, content = '') {
-  return request(app).post('/api/nodes').send({ type: 'file', name, parentId, content });
+  return authenticatedAgent.post('/api/nodes').send({ type: 'file', name, parentId, content });
 }
 
 describe('GET /api/folders/root/children', () => {
   it("renvoie une racine vide quand aucun nœud n'existe", async () => {
-    const rootListingResponse = await request(app).get('/api/folders/root/children');
+    const rootListingResponse = await authenticatedAgent.get('/api/folders/root/children');
 
     expect(rootListingResponse.status).toBe(200);
     expect(rootListingResponse.body.folder).toBeNull();
@@ -33,7 +55,7 @@ describe('GET /api/folders/:folderId/children', () => {
     await createFile('banana.txt', parentFolder.id, 'banana');
     await createFile('apple.txt', parentFolder.id, 'apple');
 
-    const listingResponse = await request(app).get(`/api/folders/${parentFolder.id}/children`);
+    const listingResponse = await authenticatedAgent.get(`/api/folders/${parentFolder.id}/children`);
 
     expect(listingResponse.status).toBe(200);
     const childNames = listingResponse.body.children.map((childNode) => childNode.name);
@@ -45,7 +67,7 @@ describe('GET /api/folders/:folderId/children', () => {
     await createFolder('SousDossier', parentFolder.id);
     await createFile('été', parentFolder.id, 'été');
 
-    const listingResponse = await request(app).get(`/api/folders/${parentFolder.id}/children`);
+    const listingResponse = await authenticatedAgent.get(`/api/folders/${parentFolder.id}/children`);
 
     const folderChild = listingResponse.body.children.find((childNode) => childNode.name === 'SousDossier');
     const fileChild = listingResponse.body.children.find((childNode) => childNode.name === 'été');
@@ -58,7 +80,7 @@ describe('GET /api/folders/:folderId/children', () => {
     const levelTwoFolder = (await createFolder('NiveauDeux', levelOneFolder.id)).body;
     const levelThreeFolder = (await createFolder('NiveauTrois', levelTwoFolder.id)).body;
 
-    const listingResponse = await request(app).get(`/api/folders/${levelThreeFolder.id}/children`);
+    const listingResponse = await authenticatedAgent.get(`/api/folders/${levelThreeFolder.id}/children`);
 
     expect(listingResponse.body.breadcrumb).toEqual([
       { id: levelOneFolder.id, name: 'NiveauUn' },
@@ -70,21 +92,21 @@ describe('GET /api/folders/:folderId/children', () => {
   it("renvoie 400 quand l'identifiant désigne un fichier", async () => {
     const createdFile = (await createFile('fichier.txt', null, 'contenu')).body;
 
-    const listingResponse = await request(app).get(`/api/folders/${createdFile.id}/children`);
+    const listingResponse = await authenticatedAgent.get(`/api/folders/${createdFile.id}/children`);
 
     expect(listingResponse.status).toBe(400);
     expect(listingResponse.body.error).toBeDefined();
   });
 
   it("renvoie 404 quand l'identifiant n'existe pas", async () => {
-    const listingResponse = await request(app).get('/api/folders/999999/children');
+    const listingResponse = await authenticatedAgent.get('/api/folders/999999/children');
 
     expect(listingResponse.status).toBe(404);
     expect(listingResponse.body.error).toBeDefined();
   });
 
   it("renvoie 400 quand l'identifiant n'est pas numérique", async () => {
-    const listingResponse = await request(app).get('/api/folders/abc/children');
+    const listingResponse = await authenticatedAgent.get('/api/folders/abc/children');
 
     expect(listingResponse.status).toBe(400);
     expect(listingResponse.body.error).toBeDefined();
@@ -131,7 +153,7 @@ describe('POST /api/nodes', () => {
   });
 
   it('renvoie 400 pour un type invalide', async () => {
-    const creationResponse = await request(app)
+    const creationResponse = await authenticatedAgent
       .post('/api/nodes')
       .send({ type: 'archive', name: 'Test', parentId: null });
 
@@ -198,7 +220,7 @@ describe('GET /api/nodes/:nodeId', () => {
   it("renvoie les métadonnées d'un nœud", async () => {
     const createdFolder = (await createFolder('DossierMeta')).body;
 
-    const nodeResponse = await request(app).get(`/api/nodes/${createdFolder.id}`);
+    const nodeResponse = await authenticatedAgent.get(`/api/nodes/${createdFolder.id}`);
 
     expect(nodeResponse.status).toBe(200);
     expect(nodeResponse.body).toMatchObject({
@@ -210,7 +232,7 @@ describe('GET /api/nodes/:nodeId', () => {
   });
 
   it("renvoie 404 quand le nœud n'existe pas", async () => {
-    const nodeResponse = await request(app).get('/api/nodes/999999');
+    const nodeResponse = await authenticatedAgent.get('/api/nodes/999999');
 
     expect(nodeResponse.status).toBe(404);
     expect(nodeResponse.body.error).toBeDefined();
@@ -221,7 +243,7 @@ describe('PATCH /api/nodes/:nodeId', () => {
   it('renomme un nœud', async () => {
     const createdFolder = (await createFolder('AncienNom')).body;
 
-    const renameResponse = await request(app)
+    const renameResponse = await authenticatedAgent
       .patch(`/api/nodes/${createdFolder.id}`)
       .send({ name: 'NouveauNom' });
 
@@ -234,7 +256,7 @@ describe('PATCH /api/nodes/:nodeId', () => {
     const destinationFolder = (await createFolder('Destination')).body;
     const fileToMove = (await createFile('fichier.txt', sourceFolder.id, 'contenu')).body;
 
-    const moveResponse = await request(app)
+    const moveResponse = await authenticatedAgent
       .patch(`/api/nodes/${fileToMove.id}`)
       .send({ parentId: destinationFolder.id });
 
@@ -246,7 +268,7 @@ describe('PATCH /api/nodes/:nodeId', () => {
     const parentFolder = (await createFolder('Parent')).body;
     const childFolder = (await createFolder('Enfant', parentFolder.id)).body;
 
-    const moveResponse = await request(app)
+    const moveResponse = await authenticatedAgent
       .patch(`/api/nodes/${childFolder.id}`)
       .send({ parentId: null });
 
@@ -257,7 +279,7 @@ describe('PATCH /api/nodes/:nodeId', () => {
   it('renvoie 400 quand on déplace un dossier dans lui-même', async () => {
     const folderToMove = (await createFolder('Recursif')).body;
 
-    const moveResponse = await request(app)
+    const moveResponse = await authenticatedAgent
       .patch(`/api/nodes/${folderToMove.id}`)
       .send({ parentId: folderToMove.id });
 
@@ -270,7 +292,7 @@ describe('PATCH /api/nodes/:nodeId', () => {
     const childFolder = (await createFolder('Enfant', ancestorFolder.id)).body;
     const grandchildFolder = (await createFolder('PetitEnfant', childFolder.id)).body;
 
-    const moveResponse = await request(app)
+    const moveResponse = await authenticatedAgent
       .patch(`/api/nodes/${ancestorFolder.id}`)
       .send({ parentId: grandchildFolder.id });
 
@@ -281,7 +303,7 @@ describe('PATCH /api/nodes/:nodeId', () => {
   it('renvoie 400 pour un corps vide', async () => {
     const createdFolder = (await createFolder('Dossier')).body;
 
-    const patchResponse = await request(app).patch(`/api/nodes/${createdFolder.id}`).send({});
+    const patchResponse = await authenticatedAgent.patch(`/api/nodes/${createdFolder.id}`).send({});
 
     expect(patchResponse.status).toBe(400);
     expect(patchResponse.body.error).toBeDefined();
@@ -292,7 +314,7 @@ describe('PATCH /api/nodes/:nodeId', () => {
     await createFolder('Existant', parentFolder.id);
     const folderToRename = (await createFolder('ARenommer', parentFolder.id)).body;
 
-    const renameResponse = await request(app)
+    const renameResponse = await authenticatedAgent
       .patch(`/api/nodes/${folderToRename.id}`)
       .send({ name: 'Existant' });
 
@@ -307,17 +329,17 @@ describe('DELETE /api/nodes/:nodeId', () => {
     const subFolder = (await createFolder('SousDossier', topFolder.id)).body;
     const fileInSubFolder = (await createFile('fichier.txt', subFolder.id, 'contenu')).body;
 
-    const deleteResponse = await request(app).delete(`/api/nodes/${topFolder.id}`);
+    const deleteResponse = await authenticatedAgent.delete(`/api/nodes/${topFolder.id}`);
     expect(deleteResponse.status).toBe(204);
 
-    const subFolderResponse = await request(app).get(`/api/nodes/${subFolder.id}`);
-    const fileResponse = await request(app).get(`/api/nodes/${fileInSubFolder.id}`);
+    const subFolderResponse = await authenticatedAgent.get(`/api/nodes/${subFolder.id}`);
+    const fileResponse = await authenticatedAgent.get(`/api/nodes/${fileInSubFolder.id}`);
     expect(subFolderResponse.status).toBe(404);
     expect(fileResponse.status).toBe(404);
   });
 
   it("renvoie 404 quand le nœud à supprimer n'existe pas", async () => {
-    const deleteResponse = await request(app).delete('/api/nodes/999999');
+    const deleteResponse = await authenticatedAgent.delete('/api/nodes/999999');
 
     expect(deleteResponse.status).toBe(404);
     expect(deleteResponse.body.error).toBeDefined();
@@ -332,11 +354,11 @@ describe('DELETE /api/nodes/:nodeId', () => {
       currentParentId = nestedFolder.id;
     }
 
-    const deleteResponse = await request(app).delete(`/api/nodes/${nestedFolderIds[0]}`);
+    const deleteResponse = await authenticatedAgent.delete(`/api/nodes/${nestedFolderIds[0]}`);
     expect(deleteResponse.status).toBe(204);
 
     for (const nestedFolderId of nestedFolderIds) {
-      const nestedFolderResponse = await request(app).get(`/api/nodes/${nestedFolderId}`);
+      const nestedFolderResponse = await authenticatedAgent.get(`/api/nodes/${nestedFolderId}`);
       expect(nestedFolderResponse.status).toBe(404);
     }
   });
@@ -346,7 +368,7 @@ describe('GET /api/files/:fileId/content', () => {
   it('renvoie le contenu et la version 1 pour un fichier fraîchement créé', async () => {
     const createdFile = (await createFile('document.txt', null, 'contenu initial')).body;
 
-    const contentResponse = await request(app).get(`/api/files/${createdFile.id}/content`);
+    const contentResponse = await authenticatedAgent.get(`/api/files/${createdFile.id}/content`);
 
     expect(contentResponse.status).toBe(200);
     expect(contentResponse.body.content).toBe('contenu initial');
@@ -356,7 +378,7 @@ describe('GET /api/files/:fileId/content', () => {
   it("renvoie 400 pour le contenu d'un dossier", async () => {
     const createdFolder = (await createFolder('Dossier')).body;
 
-    const contentResponse = await request(app).get(`/api/files/${createdFolder.id}/content`);
+    const contentResponse = await authenticatedAgent.get(`/api/files/${createdFolder.id}/content`);
 
     expect(contentResponse.status).toBe(400);
     expect(contentResponse.body.error).toBeDefined();
@@ -367,7 +389,7 @@ describe('PUT /api/files/:fileId/content', () => {
   it("renvoie 404, la route ayant été remplacée par l'édition temps réel", async () => {
     const createdFile = (await createFile('document.txt', null, 'contenu initial')).body;
 
-    const saveResponse = await request(app)
+    const saveResponse = await authenticatedAgent
       .put(`/api/files/${createdFile.id}/content`)
       .send({ content: 'contenu modifié', version: 1 });
 

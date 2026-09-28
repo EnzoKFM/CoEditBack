@@ -1,4 +1,6 @@
+import cookieParser from 'cookie-parser';
 import { Server } from 'socket.io';
+import { authenticateSocket } from '../middlewares/auth.js';
 import { findFileDocument } from '../services/nodeService.js';
 import { DocumentSession, ResyncRequiredError } from './documentSession.js';
 
@@ -68,7 +70,9 @@ export function createCollaboration({
   }
 
   function attachToHttpServer(httpServer) {
-    const io = new Server(httpServer, { cors: { origin: process.env.CLIENT_URL } });
+    const io = new Server(httpServer, { cors: { origin: process.env.CLIENT_URL, credentials: true } });
+    io.engine.use(cookieParser());
+    io.use(authenticateSocket);
 
     async function leaveDocument(socket) {
       const session = socket.data.session;
