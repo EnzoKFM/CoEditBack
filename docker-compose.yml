@@ -1,0 +1,42 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root}
+      MYSQL_DATABASE: ${DB_NAME:-coedit}
+    ports:
+      - "${DB_EXPOSED_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$${MYSQL_ROOT_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  back:
+    build: .
+    command: npm run dev
+    environment:
+      PORT: 3000
+      CLIENT_URL: ${CLIENT_URL:-http://localhost:5173}
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+      DB_PASSWORD: ${DB_PASSWORD:-root}
+      DB_NAME: ${DB_NAME:-coedit}
+      DB_TEST_NAME: ${DB_TEST_NAME:-coedit_test}
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - ./src:/app/src
+      - ./sql:/app/sql
+      - ./tests:/app/tests
+      - ./vitest.config.js:/app/vitest.config.js
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql-data:

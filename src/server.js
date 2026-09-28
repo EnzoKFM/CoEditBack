@@ -1,17 +1,8 @@
 import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
+import { app } from './app.js';
 import { pool } from './db.js';
 
-const app = express();
 const PORT = process.env.PORT || 3000;
-
-app.use(cors({ origin: process.env.CLIENT_URL }));
-app.use(express.json());
-
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
 
 app.listen(PORT, async () => {
   console.log(`API démarrée sur http://localhost:${PORT}`);
