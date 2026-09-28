@@ -385,3 +385,239 @@ describe('sauvegarde', () => {
     expect(insertedFragmentOccurrences).toBe(1);
   });
 });
+
+describe('appel audio', () => {
+  async function createConnectedClient(fileId, user) {
+    const socket = await connectClient();
+    const joinAcknowledgement = await joinDocument(socket, fileId, user);
+    return { socket, clientId: joinAcknowledgement.clientId };
+  }
+
+  function inviteCall(socket, targetClientId) {
+    return socket.emitWithAck('call:invite', { targetClientId });
+  }
+
+  function acceptCall(socket, callId) {
+    return socket.emitWithAck('call:accept', { callId });
+  }
+
+  it("mène un appel complet de l'invitation au raccroché avec relais des signaux WebRTC", async () => {
+    const createdFile = (await createFile('appel-complet.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+
+    const incomingCallReceivedByCallee = waitForEvent(callee.socket, 'call:incoming');
+    const inviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+    const incomingCallPayload = await incomingCallReceivedByCallee;
+
+    expect(inviteAcknowledgement.error).toBeUndefined();
+    expect(inviteAcknowledgement.callId).toBeDefined();
+    expect(incomingCallPayload).toEqual({
+      callId: inviteAcknowledgement.callId,
+      caller: { clientId: caller.clientId, user: { name: 'Alice', color: null } },
+    });
+
+    const acceptedReceivedByCaller = waitForEvent(caller.socket, 'call:accepted');
+    const acceptAcknowledgement = await acceptCall(callee.socket, incomingCallPayload.callId);
+    const acceptedPayload = await acceptedReceivedByCaller;
+
+    expect(acceptAcknowledgement.callId).toBe(incomingCallPayload.callId);
+    expect(acceptedPayload).toEqual({ callId: incomingCallPayload.callId, clientId: callee.clientId });
+
+    const offerReceivedByCallee = waitForEvent(callee.socket, 'call:signal');
+    caller.socket.emit('call:signal', {
+      targetClientId: callee.clientId,
+      description: { type: 'offer', sdp: 'offre-sdp' },
+    });
+    expect(await offerReceivedByCallee).toEqual({
+      clientId: caller.clientId,
+      description: { type: 'offer', sdp: 'offre-sdp' },
+    });
+
+    const answerReceivedByCaller = waitForEvent(caller.socket, 'call:signal');
+    callee.socket.emit('call:signal', {
+      targetClientId: caller.clientId,
+      description: { type: 'answer', sdp: 'reponse-sdp' },
+    });
+    expect(await answerReceivedByCaller).toEqual({
+      clientId: callee.clientId,
+      description: { type: 'answer', sdp: 'reponse-sdp' },
+    });
+
+    const candidateReceivedByCallee = waitForEvent(callee.socket, 'call:signal');
+    caller.socket.emit('call:signal', { targetClientId: callee.clientId, candidate: { candidate: 'candidat-ice' } });
+    expect(await candidateReceivedByCallee).toEqual({
+      clientId: caller.clientId,
+      candidate: { candidate: 'candidat-ice', sdpMid: null, sdpMLineIndex: null, usernameFragment: null },
+    });
+
+    const callEndedReceivedByCallee = waitForEvent(callee.socket, 'call:ended');
+    caller.socket.emit('call:hangup');
+    expect(await callEndedReceivedByCallee).toEqual({ callId: incomingCallPayload.callId, reason: 'hangup' });
+  });
+
+  it("l'appelé peut refuser un appel avant de l'accepter", async () => {
+    const createdFile = (await createFile('appel-refuse.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+
+    const incomingCallReceivedByCallee = waitForEvent(callee.socket, 'call:incoming');
+    const inviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+    await incomingCallReceivedByCallee;
+
+    const callEndedReceivedByCaller = waitForEvent(caller.socket, 'call:ended');
+    callee.socket.emit('call:hangup');
+    expect(await callEndedReceivedByCaller).toEqual({ callId: inviteAcknowledgement.callId, reason: 'declined' });
+  });
+
+  it("call:invite renvoie une erreur quand l'appelant n'a rejoint aucun document", async () => {
+    const socket = await connectClient();
+
+    const inviteAcknowledgement = await inviteCall(socket, 'un-identifiant-quelconque');
+
+    expect(inviteAcknowledgement.error).toBe('Aucun document rejoint');
+  });
+
+  it("call:invite renvoie une erreur quand la cible n'est pas dans le même document", async () => {
+    const createdFileA = (await createFile('doc-a.txt', null, 'contenu')).body;
+    const createdFileB = (await createFile('doc-b.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFileA.id, { name: 'Alice' });
+    const outsider = await createConnectedClient(createdFileB.id, { name: 'Bob' });
+
+    const inviteAcknowledgement = await inviteCall(caller.socket, outsider.clientId);
+
+    expect(inviteAcknowledgement.error).toBe('Correspondant absent du document');
+  });
+
+  it("call:invite renvoie une erreur quand on tente de s'appeler soi-même", async () => {
+    const createdFile = (await createFile('appel-soi-meme.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+
+    const inviteAcknowledgement = await inviteCall(caller.socket, caller.clientId);
+
+    expect(inviteAcknowledgement.error).toBe("Impossible de s'appeler soi-même");
+  });
+
+  it("call:invite renvoie une erreur quand l'appelant est déjà en appel", async () => {
+    const createdFile = (await createFile('appelant-occupe.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const firstCallee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const secondCallee = await createConnectedClient(createdFile.id, { name: 'Carla' });
+    await inviteCall(caller.socket, firstCallee.clientId);
+
+    const inviteAcknowledgement = await inviteCall(caller.socket, secondCallee.clientId);
+
+    expect(inviteAcknowledgement.error).toBe('Vous êtes déjà en appel');
+  });
+
+  it("call:invite renvoie une erreur quand la cible est déjà en appel, y compris en sonnerie", async () => {
+    const createdFile = (await createFile('cible-occupee.txt', null, 'contenu')).body;
+    const firstCaller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const busyCallee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const secondCaller = await createConnectedClient(createdFile.id, { name: 'Carla' });
+    await inviteCall(firstCaller.socket, busyCallee.clientId);
+
+    const inviteAcknowledgement = await inviteCall(secondCaller.socket, busyCallee.clientId);
+
+    expect(inviteAcknowledgement.error).toBe('Correspondant déjà en appel');
+  });
+
+  it("call:accept renvoie une erreur pour un identifiant d'appel inconnu", async () => {
+    const socket = await connectClient();
+
+    const acceptAcknowledgement = await acceptCall(socket, 'identifiant-inexistant');
+
+    expect(acceptAcknowledgement.error).toBe('Appel introuvable');
+  });
+
+  it("call:accept renvoie une erreur quand le client n'est pas l'appelé", async () => {
+    const createdFile = (await createFile('accept-mauvais-client.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const bystander = await createConnectedClient(createdFile.id, { name: 'Carla' });
+    const inviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+
+    const acceptAcknowledgement = await acceptCall(bystander.socket, inviteAcknowledgement.callId);
+
+    expect(acceptAcknowledgement.error).toBe('Appel introuvable');
+  });
+
+  it("call:accept renvoie une erreur quand l'appel est déjà accepté", async () => {
+    const createdFile = (await createFile('accept-double.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const inviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+    await acceptCall(callee.socket, inviteAcknowledgement.callId);
+
+    const secondAcceptAcknowledgement = await acceptCall(callee.socket, inviteAcknowledgement.callId);
+
+    expect(secondAcceptAcknowledgement.error).toBe('Appel introuvable');
+  });
+
+  it('ignore un signal invalide sans perturber le relais du signal valide suivant', async () => {
+    const createdFile = (await createFile('signal-invalide.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const inviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+    await acceptCall(callee.socket, inviteAcknowledgement.callId);
+
+    const signalReceivedByCallee = waitForEvent(callee.socket, 'call:signal');
+    caller.socket.emit('call:signal', {
+      targetClientId: callee.clientId,
+      description: { type: 'invalide', sdp: 'sdp-ignore' },
+    });
+    caller.socket.emit('call:signal', {
+      targetClientId: callee.clientId,
+      description: { type: 'offer', sdp: 'offre-valide' },
+    });
+
+    expect(await signalReceivedByCallee).toEqual({
+      clientId: caller.clientId,
+      description: { type: 'offer', sdp: 'offre-valide' },
+    });
+  });
+
+  it("raccroche automatiquement l'appel accepté à la déconnexion d'un client", async () => {
+    const createdFile = (await createFile('raccroche-deconnexion.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const inviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+    await acceptCall(callee.socket, inviteAcknowledgement.callId);
+
+    const callEndedReceivedByCaller = waitForEvent(caller.socket, 'call:ended');
+    callee.socket.disconnect();
+
+    expect(await callEndedReceivedByCaller).toEqual({ callId: inviteAcknowledgement.callId, reason: 'hangup' });
+  });
+
+  it("raccroche automatiquement l'appel accepté quand un client quitte le document", async () => {
+    const createdFile = (await createFile('raccroche-depart.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const inviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+    await acceptCall(callee.socket, inviteAcknowledgement.callId);
+
+    const callEndedReceivedByCallee = waitForEvent(callee.socket, 'call:ended');
+    caller.socket.emit('document:leave');
+
+    expect(await callEndedReceivedByCallee).toEqual({ callId: inviteAcknowledgement.callId, reason: 'hangup' });
+  });
+
+  it("les deux clients peuvent se rappeler après la fin d'un appel", async () => {
+    const createdFile = (await createFile('rappel.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const firstInviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+    await acceptCall(callee.socket, firstInviteAcknowledgement.callId);
+    const callEndedReceivedByCallee = waitForEvent(callee.socket, 'call:ended');
+    caller.socket.emit('call:hangup');
+    await callEndedReceivedByCallee;
+
+    const incomingSecondCallReceivedByCaller = waitForEvent(caller.socket, 'call:incoming');
+    const secondInviteAcknowledgement = await inviteCall(callee.socket, caller.clientId);
+    const incomingSecondCallPayload = await incomingSecondCallReceivedByCaller;
+
+    expect(secondInviteAcknowledgement.error).toBeUndefined();
+    expect(incomingSecondCallPayload.callId).toBe(secondInviteAcknowledgement.callId);
+  });
+});

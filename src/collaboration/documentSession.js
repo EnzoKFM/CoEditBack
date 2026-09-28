@@ -35,6 +35,10 @@ export class DocumentSession {
     this.collaboratorsByClientId.delete(clientId);
   }
 
+  findCollaborator(clientId) {
+    return this.collaboratorsByClientId.get(clientId) ?? null;
+  }
+
   hasCollaborators() {
     return this.collaboratorsByClientId.size > 0;
   }

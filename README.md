@@ -1,6 +1,6 @@
 # CoEditBack
 
-API de CoEdit : authentification et stockage de documents texte rangés dans une arborescence de dossiers, en vue de leur co-édition en temps réel.
+API de CoEdit : stockage de documents texte rangés dans une arborescence de dossiers, co-édition de ces documents en temps réel et appels audio entre collaborateurs.
 
 ## Démarrage (Docker)
 
@@ -193,3 +193,35 @@ Une opération décrit tout le document, dans l'ordre, sous forme d'une liste de
 ### Sauvegarde
 
 Le serveur sauvegarde lui-même : 2 s après la dernière opération, au plus tard toutes les 10 s pendant une frappe continue, et tout de suite quand le dernier éditeur quitte le document. Le front n'a rien à enregistrer.
+
+## Appels audio (WebRTC)
+
+Deux collaborateurs d'un même document peuvent s'appeler en tête-à-tête. L'audio circule directement entre les navigateurs via WebRTC : le serveur ne sert que de signalisation, sur la même connexion Socket.IO que la collaboration, et ne voit jamais passer le son.
+
+### Événements
+
+| Sens | Événement | Contenu |
+|---|---|---|
+| client → serveur | `call:invite` (ack) | `{ targetClientId }` → `{ callId }` ou `{ error }` |
+| client → serveur | `call:accept` (ack) | `{ callId }` → `{ callId }` ou `{ error }` |
+| client → serveur | `call:signal` | `{ targetClientId, description: { type, sdp } }` ou `{ targetClientId, candidate: { candidate, sdpMid, sdpMLineIndex, usernameFragment } }` |
+| client → serveur | `call:hangup` | |
+| serveur → client | `call:incoming` | `{ callId, caller: { clientId, user } }` |
+| serveur → client | `call:accepted` | `{ callId, clientId }` |
+| serveur → client | `call:signal` | `{ clientId, description }` ou `{ clientId, candidate }` |
+| serveur → client | `call:ended` | `{ callId, reason: 'declined' \| 'hangup' }` |
+
+- `targetClientId` est le `clientId` d'un collaborateur reçu dans `collaborators` ou `presence:update`. L'invitation est refusée si la cible n'est pas sur le même document, si l'un des deux est déjà en appel (sonnerie comprise) ou si l'on s'appelle soi-même.
+- Un client ne participe qu'à un appel à la fois. `call:hangup` annule une invitation (`reason: 'hangup'` pour l'appelé), refuse un appel entrant (`reason: 'declined'` pour l'appelant) ou raccroche un appel en cours.
+- Quitter le document (`document:leave`, `document:join` d'un autre fichier, déconnexion) raccroche automatiquement.
+- `call:signal` n'est relayé qu'entre les deux participants d'un appel accepté ; un signal invalide ou hors appel est ignoré. `description.type` vaut `offer` ou `answer`.
+
+### Algorithme côté front
+
+1. L'appelant envoie `call:invite` ; l'appelé reçoit `call:incoming` et répond par `call:accept` ou `call:hangup`.
+2. À `call:accepted`, l'appelant crée un `RTCPeerConnection`, y ajoute la piste micro (`getUserMedia({ audio: true })`), puis envoie `createOffer()` en `call:signal { description }`.
+3. L'appelé, à la réception de l'offre, crée son `RTCPeerConnection` avec sa piste micro, applique `setRemoteDescription`, puis renvoie `createAnswer()` en `call:signal { description }`.
+4. Chaque `icecandidate` local part en `call:signal { candidate }` ; chaque candidat reçu est passé à `addIceCandidate`. La piste distante (`track`) est branchée sur un élément `<audio autoplay>`.
+5. À `call:ended` ou en raccrochant : fermer le `RTCPeerConnection` et arrêter les pistes micro.
+
+Le `RTCPeerConnection` doit être configuré avec au moins un serveur STUN (par exemple `stun:stun.l.google.com:19302`) ; un serveur TURN sera nécessaire derrière les réseaux qui bloquent le pair-à-pair.
