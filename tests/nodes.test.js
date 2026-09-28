@@ -342,7 +342,7 @@ describe('DELETE /api/nodes/:nodeId', () => {
   });
 });
 
-describe('GET/PUT /api/files/:fileId/content', () => {
+describe('GET /api/files/:fileId/content', () => {
   it('renvoie le contenu et la version 1 pour un fichier fraîchement créé', async () => {
     const createdFile = (await createFile('document.txt', null, 'contenu initial')).body;
 
@@ -353,29 +353,6 @@ describe('GET/PUT /api/files/:fileId/content', () => {
     expect(contentResponse.body.version).toBe(1);
   });
 
-  it('enregistre le contenu avec la version 1 et renvoie la version 2', async () => {
-    const createdFile = (await createFile('document.txt', null, 'contenu initial')).body;
-
-    const saveResponse = await request(app)
-      .put(`/api/files/${createdFile.id}/content`)
-      .send({ content: 'contenu modifié', version: 1 });
-
-    expect(saveResponse.status).toBe(200);
-    expect(saveResponse.body.version).toBe(2);
-  });
-
-  it('renvoie 409 avec currentVersion quand la version est obsolète', async () => {
-    const createdFile = (await createFile('document.txt', null, 'contenu initial')).body;
-    await request(app).put(`/api/files/${createdFile.id}/content`).send({ content: 'premier', version: 1 });
-
-    const conflictResponse = await request(app)
-      .put(`/api/files/${createdFile.id}/content`)
-      .send({ content: 'deuxieme', version: 1 });
-
-    expect(conflictResponse.status).toBe(409);
-    expect(conflictResponse.body.currentVersion).toBe(2);
-  });
-
   it("renvoie 400 pour le contenu d'un dossier", async () => {
     const createdFolder = (await createFolder('Dossier')).body;
 
@@ -384,28 +361,16 @@ describe('GET/PUT /api/files/:fileId/content', () => {
     expect(contentResponse.status).toBe(400);
     expect(contentResponse.body.error).toBeDefined();
   });
+});
 
-  it('renvoie 400 quand la version est absente', async () => {
+describe('PUT /api/files/:fileId/content', () => {
+  it("renvoie 404, la route ayant été remplacée par l'édition temps réel", async () => {
     const createdFile = (await createFile('document.txt', null, 'contenu initial')).body;
 
     const saveResponse = await request(app)
       .put(`/api/files/${createdFile.id}/content`)
-      .send({ content: 'contenu modifié' });
+      .send({ content: 'contenu modifié', version: 1 });
 
-    expect(saveResponse.status).toBe(400);
-    expect(saveResponse.body.error).toBeDefined();
-  });
-
-  it("met à jour la size renvoyée par le listage après un PUT de contenu", async () => {
-    const parentFolder = (await createFolder('Parent')).body;
-    const createdFile = (await createFile('document.txt', parentFolder.id, 'court')).body;
-
-    await request(app)
-      .put(`/api/files/${createdFile.id}/content`)
-      .send({ content: 'contenu bien plus long', version: 1 });
-
-    const listingResponse = await request(app).get(`/api/folders/${parentFolder.id}/children`);
-    const updatedFileChild = listingResponse.body.children.find((childNode) => childNode.id === createdFile.id);
-    expect(updatedFileChild.size).toBe('contenu bien plus long'.length);
+    expect(saveResponse.status).toBe(404);
   });
 });
