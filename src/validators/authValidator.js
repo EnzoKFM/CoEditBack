@@ -55,6 +55,19 @@ export function validateNewPassword(rawPassword) {
   return password;
 }
 
+// Vérifie un code 2FA : 6 chiffres, les espaces sont tolérés ("123 456")
+export function validateTotpCode(rawCode) {
+  if (typeof rawCode !== 'string') {
+    throw new HttpError(400, 'Le code est obligatoire');
+  }
+
+  const code = rawCode.replace(/\s/g, '');
+  if (!/^\d{6}$/.test(code)) {
+    throw new HttpError(400, 'Le code doit contenir 6 chiffres');
+  }
+  return code;
+}
+
 // Validation du corps de la requête pour la connexion
 export function validateLoginBody(requestBody) {
   const { email, password } = requestBody ?? {};

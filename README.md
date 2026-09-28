@@ -55,13 +55,26 @@ La session est un JWT placé dans un cookie `token` (`HttpOnly`, `SameSite=Stric
 
 | Méthode | Route | Corps | Réponse |
 |---|---|---|---|
-| POST | `/api/auth/login` | `{ email, password }` | `{ user }` + cookie ; 401 identifiants incorrects, 403 compte bloqué |
+| POST | `/api/auth/login` | `{ email, password }` | `{ user }` + cookie ; si 2FA active : `{ twoFactorRequired: true }` ; 401 identifiants incorrects, 403 compte bloqué |
+| POST | `/api/auth/login/2fa` | `{ code }` | `{ user }` + cookie ; 401 code incorrect ou délai de 5 min dépassé |
 | POST | `/api/auth/logout` | | 204, cookie supprimé |
 | GET | `/api/auth/me` | | `{ user }` ; 401 sans session valide |
 
 `user` vaut `{ id, email, firstName, lastName, role, totpEnabled }`.
 
-`/login` accepte 10 échecs par IP toutes les 15 minutes, puis renvoie 429 ; les connexions réussies ne sont pas comptées. En développement, redémarrer l'API (`rs` dans nodemon) remet le compteur à zéro.
+`/login`, `/login/2fa` et la désactivation de la 2FA partagent une limite de 10 échecs par IP toutes les 15 minutes, puis renvoient 429 ; les requêtes réussies ne sont pas comptées. En développement, redémarrer l'API (`rs` dans nodemon) remet le compteur à zéro.
+
+### Double authentification (TOTP)
+
+Compatible Google Authenticator, Authy, Microsoft Authenticator… Routes réservées à l'utilisateur connecté :
+
+| Méthode | Route | Corps | Réponse |
+|---|---|---|---|
+| POST | `/api/users/me/2fa/setup` | | `{ qrCode, secret }` : QR code (data URL pour un `<img>`) et secret pour une saisie manuelle. La 2FA n'est pas encore active ; 409 si elle l'est déjà |
+| POST | `/api/users/me/2fa/enable` | `{ code }` | `{ user }` ; active la 2FA si le code est valide, 400 sinon |
+| POST | `/api/users/me/2fa/disable` | `{ password, code }` | `{ user }` ; 400 si le mot de passe ou le code est incorrect |
+
+Connexion d'un compte avec 2FA : `/login` vérifie le mot de passe et pose un cookie temporaire `pending_2fa` (5 min), qui n'ouvre pas de session ; `/login/2fa` vérifie le code et pose le vrai cookie de session. Le code est accepté avec une tolérance de 30 s, et les espaces sont ignorés.
 
 Pour protéger une route : `requireAuth` (401 si non connecté, expose `request.user`) et `requireAdmin` (403 si non admin), dans `src/middlewares/auth.js`. Un compte bloqué perd sa session dès la requête suivante.
 

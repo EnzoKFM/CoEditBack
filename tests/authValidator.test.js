@@ -5,7 +5,23 @@ import {
   validateLoginBody,
   validateNewPassword,
   validatePassword,
+  validateTotpCode,
 } from '../src/validators/authValidator.js';
+
+describe('validateTotpCode', () => {
+  it('accepte 6 chiffres et retire les espaces', () => {
+    expect(validateTotpCode('123456')).toBe('123456');
+    expect(validateTotpCode(' 123 456 ')).toBe('123456');
+  });
+
+  it.each([undefined, null, 123456])('refuse une valeur non textuelle (%s)', (rawCode) => {
+    expect(() => validateTotpCode(rawCode)).toThrow('Le code est obligatoire');
+  });
+
+  it.each(['', '12345', '1234567', '12a456'])('refuse un code mal formé (%s)', (rawCode) => {
+    expect(() => validateTotpCode(rawCode)).toThrow('Le code doit contenir 6 chiffres');
+  });
+});
 
 describe('normalizeEmail', () => {
   it('retire les espaces et passe en minuscules', () => {

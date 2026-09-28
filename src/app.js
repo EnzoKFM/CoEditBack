@@ -7,6 +7,7 @@ import { authRoutes } from './routes/authRoutes.js';
 import { fileRoutes } from './routes/fileRoutes.js';
 import { folderRoutes } from './routes/folderRoutes.js';
 import { nodeRoutes } from './routes/nodeRoutes.js';
+import { twoFactorRoutes } from './routes/twoFactorRoutes.js';
 
 export const app = express();
 
@@ -20,6 +21,7 @@ app.get('/api/health', (req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/users/me/2fa', twoFactorRoutes);
 app.use('/api/folders', folderRoutes);
 app.use('/api/nodes', nodeRoutes);
 app.use('/api/files', fileRoutes);

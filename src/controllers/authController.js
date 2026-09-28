@@ -1,8 +1,15 @@
 import bcrypt from 'bcryptjs';
 import { HttpError } from '../errors/HttpError.js';
-import { clearAuthCookie, setAuthCookie } from '../lib/auth.js';
-import { findUserByEmail, toUserResponse } from '../services/userService.js';
-import { validateLoginBody } from '../validators/authValidator.js';
+import { clearAuthCookie, setAuthCookie } from '../lib/sessionCookie.js';
+import {
+  PENDING_2FA_COOKIE,
+  clearPending2faCookie,
+  setPending2faCookie,
+  verifyPending2faToken,
+} from '../lib/pending2faCookie.js';
+import { isTotpCodeValid } from '../lib/totp.js';
+import { findUserByEmail, findUserById, toUserResponse } from '../services/userService.js';
+import { validateLoginBody, validateTotpCode } from '../validators/authValidator.js';
 
 // Hash factice comparé quand l'email est inconnu : le temps de réponse est le
 // même que pour un vrai compte, ce qui empêche de deviner les emails existants.
@@ -23,6 +30,41 @@ export async function login(request, response) {
     throw new HttpError(403, 'Ce compte est bloqué');
   }
 
+  // 2FA activée : le mot de passe ne suffit pas, on attend le code avant d'ouvrir la session
+  if (user.totp_enabled) {
+    setPending2faCookie(response, user);
+    return response.json({ twoFactorRequired: true });
+  }
+
+  setAuthCookie(response, user);
+  response.json({ user: toUserResponse(user) });
+}
+
+
+// Deuxième étape de connexion : vérification du code 2FA
+export async function loginWithTwoFactor(request, response) {
+  const code = validateTotpCode(request.body?.code);
+
+  const pendingToken = request.cookies[PENDING_2FA_COOKIE];
+  let tokenPayload;
+  try {
+    tokenPayload = verifyPending2faToken(pendingToken);
+  } catch {
+    clearPending2faCookie(response);
+    throw new HttpError(401, 'Délai dépassé, reconnectez-vous');
+  }
+
+  const user = await findUserById(tokenPayload.userId);
+  if (!user || user.is_blocked || !user.totp_enabled) {
+    clearPending2faCookie(response);
+    throw new HttpError(401, 'Délai dépassé, reconnectez-vous');
+  }
+
+  if (!(await isTotpCodeValid(user.totp_secret, code))) {
+    throw new HttpError(401, 'Code incorrect');
+  }
+
+  clearPending2faCookie(response);
   setAuthCookie(response, user);
   response.json({ user: toUserResponse(user) });
 }
@@ -31,6 +73,7 @@ export async function login(request, response) {
 // Déconnexion d'un utilisateur
 export function logout(request, response) {
   clearAuthCookie(response);
+  clearPending2faCookie(response);
   response.status(204).end();
 }
 
