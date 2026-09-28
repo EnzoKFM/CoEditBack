@@ -1,99 +1,154 @@
-import { Hocuspocus } from '@hocuspocus/server';
-import { WebSocketServer } from 'ws';
-import * as Y from 'yjs';
-import { findFileDocument, storeFileDocument } from '../services/nodeService.js';
-
-export const COLLABORATION_PATH = '/collaboration';
-export const DOCUMENT_TEXT_NAME = 'content';
+import { Server } from 'socket.io';
+import { findFileDocument } from '../services/nodeService.js';
+import { DocumentSession, ResyncRequiredError } from './documentSession.js';
 
 const DEFAULT_STORE_DEBOUNCE_MS = 2000;
 const DEFAULT_STORE_MAX_DEBOUNCE_MS = 10000;
-const FILE_ID_PATTERN = /^[1-9]\d*$/;
+const MAX_USER_NAME_LENGTH = 100;
+const MAX_USER_COLOR_LENGTH = 32;
+const DEFAULT_USER_NAME = 'Anonyme';
 
-function parseFileId(documentName) {
-  if (!FILE_ID_PATTERN.test(documentName)) {
-    throw new Error(`Nom de document invalide : ${documentName}`);
+function parseFileId(rawFileId) {
+  const fileId = Number(rawFileId);
+  if (!Number.isInteger(fileId) || fileId <= 0) {
+    throw new Error('Identifiant de fichier invalide');
   }
-  return Number(documentName);
+  return fileId;
 }
 
-async function getExistingFileDocument(documentName) {
-  const fileDocument = await findFileDocument(parseFileId(documentName));
-  if (!fileDocument) {
-    throw new Error(`Fichier introuvable : ${documentName}`);
-  }
-  return fileDocument;
+function parseUser(rawUser) {
+  const userName = typeof rawUser?.name === 'string' ? rawUser.name.trim().slice(0, MAX_USER_NAME_LENGTH) : '';
+  const userColor = typeof rawUser?.color === 'string' ? rawUser.color.slice(0, MAX_USER_COLOR_LENGTH) : null;
+  return { name: userName || DEFAULT_USER_NAME, color: userColor };
 }
 
-function toYjsState(document) {
-  return Buffer.from(Y.encodeStateAsUpdate(document));
-}
-
-async function createInitialYjsState(documentName, content) {
-  const initialDocument = new Y.Doc();
-  initialDocument.getText(DOCUMENT_TEXT_NAME).insert(0, content);
-  const initialYjsState = toYjsState(initialDocument);
-  await storeFileDocument(parseFileId(documentName), { content, yjsState: initialYjsState });
-  return initialYjsState;
-}
-
-function toFetchRequest(incomingRequest, requestUrl) {
-  const requestHeaders = new Headers();
-  for (const [headerName, headerValue] of Object.entries(incomingRequest.headers)) {
-    if (headerValue !== undefined) {
-      requestHeaders.set(headerName, Array.isArray(headerValue) ? headerValue.join(', ') : headerValue);
-    }
-  }
-  return new Request(requestUrl, { headers: requestHeaders });
+function toRoomName(fileId) {
+  return `file:${fileId}`;
 }
 
 export function createCollaboration({
   storeDebounceMs = DEFAULT_STORE_DEBOUNCE_MS,
   storeMaxDebounceMs = DEFAULT_STORE_MAX_DEBOUNCE_MS,
 } = {}) {
-  const hocuspocus = new Hocuspocus({
-    debounce: storeDebounceMs,
-    maxDebounce: storeMaxDebounceMs,
-    quiet: true,
+  const sessionPromisesByFileId = new Map();
 
-    async onConnect({ documentName }) {
-      await getExistingFileDocument(documentName);
-    },
+  function loadSession(fileId) {
+    const existingSessionPromise = sessionPromisesByFileId.get(fileId);
+    if (existingSessionPromise) {
+      return existingSessionPromise;
+    }
 
-    async onLoadDocument({ documentName }) {
-      const fileDocument = await getExistingFileDocument(documentName);
-      const yjsState = fileDocument.yjsState ?? (await createInitialYjsState(documentName, fileDocument.content));
-      return new Uint8Array(yjsState);
-    },
-
-    async onStoreDocument({ document, documentName }) {
-      await storeFileDocument(parseFileId(documentName), {
-        content: document.getText(DOCUMENT_TEXT_NAME).toString(),
-        yjsState: toYjsState(document),
-      });
-    },
-  });
-
-  function attachToHttpServer(httpServer) {
-    const webSocketServer = new WebSocketServer({ noServer: true });
-
-    httpServer.on('upgrade', (incomingRequest, socket, head) => {
-      const requestUrl = new URL(incomingRequest.url, 'http://localhost');
-      if (requestUrl.pathname !== COLLABORATION_PATH) {
-        socket.destroy();
-        return;
+    const sessionPromise = findFileDocument(fileId).then((fileDocument) => {
+      if (!fileDocument) {
+        throw new Error('Fichier introuvable');
       }
-
-      webSocketServer.handleUpgrade(incomingRequest, socket, head, (websocket) => {
-        const clientConnection = hocuspocus.handleConnection(websocket, toFetchRequest(incomingRequest, requestUrl));
-        websocket.on('message', (messageData) => clientConnection.handleMessage(new Uint8Array(messageData)));
-        websocket.on('close', (closeCode, closeReason) => {
-          clientConnection.handleClose({ code: closeCode, reason: closeReason.toString() });
-        });
-        websocket.on('error', (error) => console.error('Erreur WebSocket de collaboration :', error.message));
+      return new DocumentSession({
+        fileId,
+        content: fileDocument.content,
+        revision: fileDocument.revision,
+        storeDebounceMs,
+        storeMaxDebounceMs,
       });
     });
+    sessionPromisesByFileId.set(fileId, sessionPromise);
+    sessionPromise.catch(() => {
+      if (sessionPromisesByFileId.get(fileId) === sessionPromise) {
+        sessionPromisesByFileId.delete(fileId);
+      }
+    });
+    return sessionPromise;
   }
 
-  return { hocuspocus, attachToHttpServer };
+  async function unloadSessionIfIdle(session) {
+    await session.store();
+    const sessionPromise = sessionPromisesByFileId.get(session.fileId);
+    if (!session.hasCollaborators() && sessionPromise && (await sessionPromise) === session) {
+      sessionPromisesByFileId.delete(session.fileId);
+    }
+  }
+
+  function attachToHttpServer(httpServer) {
+    const io = new Server(httpServer, { cors: { origin: process.env.CLIENT_URL } });
+
+    async function leaveDocument(socket) {
+      const session = socket.data.session;
+      if (!session) {
+        return;
+      }
+      socket.data.session = null;
+      session.removeCollaborator(socket.id);
+      socket.leave(toRoomName(session.fileId));
+      io.to(toRoomName(session.fileId)).emit('presence:leave', { clientId: socket.id });
+      if (!session.hasCollaborators()) {
+        await unloadSessionIfIdle(session);
+      }
+    }
+
+    io.on('connection', (socket) => {
+      socket.on('document:join', async (joinRequest, acknowledge) => {
+        if (typeof acknowledge !== 'function') {
+          return;
+        }
+        try {
+          const fileId = parseFileId(joinRequest?.fileId);
+          await leaveDocument(socket);
+          const session = await loadSession(fileId);
+          const collaborator = session.addCollaborator(socket.id, parseUser(joinRequest?.user));
+          socket.data.session = session;
+          socket.join(toRoomName(fileId));
+          socket.to(toRoomName(fileId)).emit('presence:update', collaborator);
+          acknowledge({
+            clientId: socket.id,
+            content: session.content,
+            revision: session.revision,
+            collaborators: session
+              .listCollaborators()
+              .filter((otherCollaborator) => otherCollaborator.clientId !== socket.id),
+          });
+        } catch (error) {
+          acknowledge({ error: error.message });
+        }
+      });
+
+      socket.on('document:operation', (operationRequest, acknowledge) => {
+        if (typeof acknowledge !== 'function') {
+          return;
+        }
+        const session = socket.data.session;
+        if (!session) {
+          acknowledge({ error: 'Aucun document rejoint' });
+          return;
+        }
+        try {
+          const { revision, operation } = session.receiveOperation(
+            operationRequest?.revision,
+            operationRequest?.operation,
+          );
+          socket.to(toRoomName(session.fileId)).emit('document:operation', {
+            clientId: socket.id,
+            revision,
+            operation,
+          });
+          acknowledge({ revision });
+        } catch (error) {
+          acknowledge({ error: error.message, isResyncRequired: error instanceof ResyncRequiredError });
+        }
+      });
+
+      socket.on('presence:update', (presence) => {
+        const session = socket.data.session;
+        const collaborator = session?.updatePresence(socket.id, presence ?? {});
+        if (collaborator) {
+          socket.to(toRoomName(session.fileId)).emit('presence:update', collaborator);
+        }
+      });
+
+      socket.on('document:leave', () => leaveDocument(socket));
+      socket.on('disconnect', () => leaveDocument(socket));
+    });
+
+    return io;
+  }
+
+  return { attachToHttpServer };
 }

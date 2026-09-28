@@ -39,7 +39,7 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 ## Modèle de données
 
 - `nodes` : dossiers et fichiers (`type` = `folder` | `file`), rattachés à leur parent par `parent_id` (`NULL` = racine). Deux éléments d'un même dossier ne peuvent pas porter le même nom (comparaison insensible à la casse, sensible aux accents). `owner_id` est réservé à la future authentification.
-- `file_contents` : état Yjs du document (`yjs_state`), sa copie en texte brut (`content`) et un numéro de `version` incrémenté à chaque sauvegarde.
+- `file_contents` : texte du document (`content`), `revision` (nombre d'opérations appliquées, voir la collaboration) et `version` (incrémentée à chaque sauvegarde).
 
 ## API
 
@@ -80,29 +80,42 @@ Toutes les erreurs renvoient `{ "error": "message" }` : 400 (requête invalide),
 
 ## Collaboration temps réel
 
-Le serveur [Hocuspocus](https://tiptap.dev/docs/hocuspocus) écoute en WebSocket sur `ws://localhost:3000/collaboration`, sur le même port que l'API. Les éditions simultanées sont fusionnées par [Yjs](https://docs.yjs.dev) sans conflit.
+La synchronisation repose sur une transformation opérationnelle (OT) écrite pour le projet, sans Yjs. Le transport est [Socket.IO](https://socket.io), sur le même port que l'API (`http://localhost:3000`, chemin par défaut `/socket.io`). Le serveur fait autorité : il ordonne les opérations, les transforme, les applique, puis les diffuse.
 
-- **Nom du document** : l'identifiant du fichier, en chaîne (`"9"`). Une connexion à un identifiant inexistant, à un dossier ou à un nom non numérique est refusée.
-- **Texte** : `document.getText('content')` (`Y.Text`), à relier à l'éditeur du front (par exemple `y-codemirror.next` ou `y-monaco`).
-- **Sauvegarde** : réalisée par le serveur, 2 s après la dernière modification, au plus tard toutes les 10 s pendant une frappe continue, et immédiatement quand le dernier éditeur quitte le document. Le front n'a rien à enregistrer.
-- **Présence (curseurs, souris)** : via l'awareness Yjs, relayée par le serveur sans être stockée. Convention proposée pour le front :
+### Opérations
+
+Une opération décrit tout le document, dans l'ordre, sous forme d'une liste de composants :
 
 ```js
-import { HocuspocusProvider } from '@hocuspocus/provider';
-import * as Y from 'yjs';
-
-const document = new Y.Doc();
-const provider = new HocuspocusProvider({
-  url: 'ws://localhost:3000/collaboration',
-  name: String(fileId),
-  document,
-});
-
-provider.setAwarenessField('user', { name: 'Alice', color: '#e67e22' });
-provider.setAwarenessField('pointer', { x: 120, y: 348 });
-provider.awareness.on('change', () => {
-  const connectedUsers = [...provider.awareness.getStates().values()];
-});
+[{ retain: 6 }, { insert: 'cher ' }, { retain: 5 }, { delete: 3 }]
 ```
 
-Le curseur et la sélection dans le texte sont diffusés par le binding d'éditeur (`y-codemirror.next`, `y-monaco`) à partir de cette même awareness.
+`retain` conserve des caractères, `insert` en ajoute, `delete` en supprime. La somme des `retain` et `delete` doit égaler la longueur du document de départ. Les positions sont comptées en unités UTF-16 (`string.length` en JavaScript). Le module [src/collaboration/textOperation.js](src/collaboration/textOperation.js), sans dépendance, peut être copié tel quel dans le front (`applyOperation`, `transformOperation`, `transformIndex`).
+
+### Événements
+
+| Sens | Événement | Contenu |
+|---|---|---|
+| client → serveur | `document:join` (ack) | `{ fileId, user: { name, color } }` → `{ clientId, content, revision, collaborators }` ou `{ error }` |
+| client → serveur | `document:operation` (ack) | `{ revision, operation }` → `{ revision }` ou `{ error, isResyncRequired }` |
+| client → serveur | `presence:update` | `{ selection: { anchor, head } \| null, pointer: { x, y } \| null }` |
+| client → serveur | `document:leave` | |
+| serveur → clients | `document:operation` | `{ clientId, revision, operation }` |
+| serveur → clients | `presence:update` | `{ clientId, user, selection, pointer }` |
+| serveur → clients | `presence:leave` | `{ clientId }` |
+
+- `revision` est la révision du document sur laquelle l'opération a été écrite. Le serveur la transforme contre les opérations appliquées depuis, puis renvoie la nouvelle révision dans l'accusé.
+- Un fichier inexistant, un dossier ou un identifiant invalide est refusé à `document:join`.
+- `isResyncRequired: true` signale une révision antérieure au chargement du document en mémoire (après une reconnexion par exemple) : il faut rejoindre à nouveau le document.
+- La présence n'est pas stockée. Le serveur transforme toutefois les sélections qu'il connaît à chaque opération, pour qu'un nouvel arrivant les reçoive à jour dans `collaborators`.
+
+### Algorithme côté front
+
+1. À l'ouverture, `document:join`, puis afficher `content` et mémoriser `revision`.
+2. Une modification locale est appliquée tout de suite. Si aucune opération n'attend d'accusé, l'envoyer avec `revision` ; sinon, la mettre en tampon.
+3. À l'accusé : `revision` prend la valeur reçue, et la première opération du tampon part à son tour.
+4. À la réception d'une `document:operation` d'un autre client : `[enAttente, reçue] = transformOperation(enAttente, reçue)`, puis même chose avec chaque opération du tampon dans l'ordre, puis appliquer `reçue` au texte et faire `revision = message.revision`. Les curseurs distants sont décalés avec `transformIndex`.
+
+### Sauvegarde
+
+Le serveur sauvegarde lui-même : 2 s après la dernière opération, au plus tard toutes les 10 s pendant une frappe continue, et tout de suite quand le dernier éditeur quitte le document. Le front n'a rien à enregistrer.

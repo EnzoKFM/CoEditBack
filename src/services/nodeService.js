@@ -220,7 +220,7 @@ export async function getFileContent(fileId) {
 
 export async function findFileDocument(fileId) {
   const [fileRows] = await pool.query(
-    `SELECT file_content.content, file_content.yjs_state
+    `SELECT file_content.content, file_content.revision
      FROM file_contents AS file_content
      JOIN nodes AS node ON node.id = file_content.node_id
      WHERE node.id = ? AND node.type = 'file'`,
@@ -231,19 +231,19 @@ export async function findFileDocument(fileId) {
   if (!fileRow) {
     return null;
   }
-  return { content: fileRow.content, yjsState: fileRow.yjs_state };
+  return { content: fileRow.content, revision: fileRow.revision };
 }
 
-export async function storeFileDocument(fileId, { content, yjsState }) {
+export async function storeFileDocument(fileId, { content, revision }) {
   await pool.query(
     `UPDATE file_contents AS file_content
      JOIN nodes AS node ON node.id = file_content.node_id
      SET file_content.content = ?,
-         file_content.yjs_state = ?,
+         file_content.revision = ?,
          file_content.version = file_content.version + 1,
          file_content.updated_at = CURRENT_TIMESTAMP,
          node.updated_at = CURRENT_TIMESTAMP
      WHERE file_content.node_id = ?`,
-    [content, yjsState, fileId],
+    [content, revision, fileId],
   );
 }

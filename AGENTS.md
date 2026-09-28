@@ -6,7 +6,7 @@ Consignes pour les agents IA (Claude Code, Codex, Cursor…) qui travaillent sur
 
 CoEditBack est l'API de CoEdit, un « Google Drive » de documents texte co-édités en temps réel. Le back stocke l'arborescence des dossiers et fichiers ainsi que leur contenu, et héberge le serveur de collaboration. Le front est un dépôt séparé, qui n'est pas lancé dans Docker.
 
-Stack : Node 22 (ESM), Express 5, MySQL 8.4 via `mysql2/promise` (SQL écrit à la main, sans ORM), Hocuspocus v4 et Yjs pour le temps réel, vitest 3 et supertest pour les tests.
+Stack : Node 22 (ESM), Express 5, MySQL 8.4 via `mysql2/promise` (SQL écrit à la main, sans ORM), Socket.IO et une transformation opérationnelle (OT) maison pour le temps réel, vitest 3 et supertest pour les tests.
 
 ## Commandes
 
@@ -19,31 +19,34 @@ docker compose exec back npx vitest run -t "<nom du test>"
 docker compose exec back npm run db:init
 ```
 
-Le Node de l'hôte peut être trop ancien pour Hocuspocus : ne pas lancer les tests hors du conteneur.
+Le Node de l'hôte peut être trop ancien : ne pas lancer les tests hors du conteneur.
 
 ## Architecture
 
 ```
 sql/schema.sql                         schéma, en CREATE TABLE IF NOT EXISTS
 src/app.js                             application Express (routes et gestion des erreurs), sans listen
-src/server.js                          écoute HTTP et branchement du WebSocket de collaboration
+src/server.js                          écoute HTTP et branchement de Socket.IO
 src/routes/*.js                        /api/folders, /api/nodes, /api/files
 src/controllers/nodeController.js      lecture de la requête, validation, appel du service
 src/validators/nodeValidator.js        parse ou lève une HttpError 400
 src/services/nodeService.js            tout le SQL, avec les transactions (withTransaction)
-src/collaboration/collaborationServer.js  Hocuspocus : chargement et sauvegarde de l'état Yjs
+src/collaboration/textOperation.js     OT pure : parse, application, transformation d'opérations
+src/collaboration/documentSession.js   document en mémoire : révision, historique, présence, sauvegarde
+src/collaboration/collaborationServer.js  événements Socket.IO, chargement et déchargement des sessions
 src/errors/HttpError.js, src/middlewares/errorHandler.js
 tests/*.test.js                        tests d'intégration sur une vraie base MySQL de test
 ```
 
 Modèle de données :
 - `nodes` : dossiers et fichiers, organisés en liste d'adjacence (`parent_id` vaut NULL à la racine). Le nom est unique par dossier via `UNIQUE(parent_key, name)`, où `parent_key` = `COALESCE(parent_id, 0)` couvre aussi la racine.
-- `file_contents` : `yjs_state` (source de vérité), `content` (copie texte brute), `version`.
+- `file_contents` : `content`, `revision` (nombre d'opérations OT appliquées), `version` (nombre de sauvegardes).
 
 ## Règles à respecter
 
-- **Aucune écriture de contenu en REST.** Un document ne se modifie que par le WebSocket Hocuspocus (`/collaboration`), et c'est le serveur qui sauvegarde (`onStoreDocument`). Une route d'écriture de contenu contournerait la fusion Yjs.
-- **Nom de document Hocuspocus** = l'id du fichier, en chaîne. Le texte vit dans `document.getText('content')`.
+- **Yjs est interdit** (consigne du projet), ainsi que tout ce qui repose dessus (Hocuspocus, y-websocket, bindings y-*). Ne pas introduire d'autre bibliothèque de synchronisation (ShareDB, Automerge…) sans accord explicite.
+- **Aucune écriture de contenu en REST.** Un document ne se modifie que par l'événement Socket.IO `document:operation`, et c'est le serveur qui sauvegarde (`DocumentSession.store`). Une route d'écriture de contenu contournerait l'OT.
+- **Le serveur fait autorité** : toute opération est transformée contre l'historique depuis sa révision de base, dans `receiveOperation`, qui reste synchrone pour que l'ordre des opérations soit garanti. Toute modification de `textOperation.js` doit garder la convergence (testée dans `tests/textOperation.test.js`).
 - **Suppression d'un dossier** : elle se fait niveau par niveau, du plus profond au plus haut (`deleteNode`), parce qu'InnoDB limite les cascades à 15 niveaux (erreur 3008). Ne pas la remplacer par un simple `DELETE`.
 - **Évolution du schéma** : `schema.sql` ne crée que les tables absentes. Signaler toute modification, car les bases existantes doivent être migrées à la main ou recréées (`docker compose down -v`). La base de test, elle, est recréée à chaque lancement.
 - **Erreurs** : lever une `HttpError(status, message)`. Les messages destinés au client sont en français. `ER_DUP_ENTRY` est converti en 409 par `errorHandler`.
