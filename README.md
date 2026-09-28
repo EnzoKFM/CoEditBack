@@ -71,7 +71,7 @@ Limitation des tentatives (seuls les échecs comptent, fenêtre de 15 minutes, p
 |---|---|
 | `/login` | 20 échecs par IP, et 10 échecs par compte (email), quelle que soit l'IP |
 | `/login/2fa` | 10 échecs par IP |
-| `/2fa/setup`, `/2fa/disable` | 10 échecs par utilisateur connecté |
+| `/2fa/setup`, `/2fa/disable`, `PATCH /api/users/me`, `/api/users/me/password` | 10 échecs par utilisateur connecté |
 
 La limite par compte bloque aussi son propriétaire pendant 15 minutes : c'est la contrepartie de la protection contre une attaque répartie sur plusieurs IP. En développement, redémarrer l'API (`rs` dans nodemon) remet les compteurs à zéro.
 
@@ -88,6 +88,30 @@ Compatible Google Authenticator, Authy, Microsoft Authenticator… Routes réser
 Connexion d'un compte avec 2FA : `/login` vérifie le mot de passe et pose un cookie temporaire `pending_2fa` (5 min), qui n'ouvre pas de session ; `/login/2fa` vérifie le code et pose le vrai cookie de session. Le cookie temporaire devient invalide si les sessions de l'utilisateur sont révoquées entre-temps. Le code est accepté avec une tolérance de 30 s, les espaces sont ignorés, et **un code ne sert qu'une fois** (connexion, activation et désactivation confondues).
 
 Pour protéger une route : `requireAuth` (401 si non connecté, expose `request.user`) et `requireAdmin` (403 si non admin), dans `src/middlewares/auth.js`. Un compte bloqué perd sa session dès la requête suivante.
+
+### Profil
+
+Routes réservées à l'utilisateur connecté :
+
+| Méthode | Route | Corps | Réponse |
+|---|---|---|---|
+| PATCH | `/api/users/me` | `{ firstName?, lastName?, email?, currentPassword? }` | `{ user }` ; au moins un champ. `currentPassword` est obligatoire pour changer l'email (identifiant de connexion). 400 si invalide ou mot de passe incorrect, 409 si l'email est déjà utilisé |
+| PATCH | `/api/users/me/password` | `{ currentPassword, newPassword }` | `{ user }` + nouveau cookie ; toutes les autres sessions sont révoquées. 400 si le mot de passe actuel est incorrect ou si le nouveau est trop faible |
+
+Un nouveau mot de passe doit contenir au moins 8 caractères, dont une minuscule, une majuscule, un chiffre et un caractère spécial.
+
+### Administration des comptes
+
+Il n'y a pas d'inscription publique : les comptes sont créés par un administrateur. Routes réservées aux admins (401 sans session, 403 pour un non-admin) :
+
+| Méthode | Route | Corps | Réponse |
+|---|---|---|---|
+| GET | `/api/admin/users` | | `{ users }`, triés par nom |
+| POST | `/api/admin/users` | `{ email, firstName, lastName, password, role? }` | 201 + `{ user }` ; `role` vaut `user` (défaut) ou `admin`. 409 si l'email est déjà utilisé |
+| PATCH | `/api/admin/users/:userId/block` | | `{ user }` ; la session du compte est coupée immédiatement et il ne peut plus se connecter (403). 400 pour son propre compte, 404 si introuvable |
+| PATCH | `/api/admin/users/:userId/unblock` | | `{ user }` |
+
+Un `user` vu par un admin contient en plus `isBlocked` et `createdAt`.
 
 ### Documents
 

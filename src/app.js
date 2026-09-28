@@ -4,10 +4,12 @@ import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { requireAuth } from './middlewares/auth.js';
 import { errorHandler } from './middlewares/errorHandler.js';
+import { adminUserRoutes } from './routes/adminUserRoutes.js';
 import { authRoutes } from './routes/authRoutes.js';
 import { fileRoutes } from './routes/fileRoutes.js';
 import { folderRoutes } from './routes/folderRoutes.js';
 import { nodeRoutes } from './routes/nodeRoutes.js';
+import { profileRoutes } from './routes/profileRoutes.js';
 import { twoFactorRoutes } from './routes/twoFactorRoutes.js';
 
 export const app = express();
@@ -27,6 +29,8 @@ app.get('/api/health', (req, res) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users/me/2fa', twoFactorRoutes);
+app.use('/api/users/me', profileRoutes);
+app.use('/api/admin/users', adminUserRoutes);
 app.use('/api/folders', requireAuth, folderRoutes);
 app.use('/api/nodes', requireAuth, nodeRoutes);
 app.use('/api/files', requireAuth, fileRoutes);
