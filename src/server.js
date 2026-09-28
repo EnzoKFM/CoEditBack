@@ -2,6 +2,10 @@ import 'dotenv/config';
 import { app } from './app.js';
 import { pool } from './db.js';
 
+if (!process.env.JWT_SECRET) {
+  throw new Error('JWT_SECRET manquant dans le .env (voir .env.example)');
+}
+
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, async () => {
