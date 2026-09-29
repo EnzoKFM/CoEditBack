@@ -10,13 +10,26 @@ import {
 export class ResyncRequiredError extends Error {}
 
 export class DocumentSession {
-  constructor({ fileId, content, revision, storeDebounceMs, storeMaxDebounceMs }) {
+  constructor({
+    fileId,
+    content,
+    revision,
+    storeDebounceMs,
+    storeMaxDebounceMs,
+    maxHistoryLength,
+    maxHistorySize,
+    maxDocumentLength,
+  }) {
     this.fileId = fileId;
     this.content = content;
     this.revision = revision;
     this.queuedStoreRevision = revision;
     this.historyStartRevision = revision;
     this.operationHistory = [];
+    this.historySize = 0;
+    this.maxHistoryLength = maxHistoryLength;
+    this.maxHistorySize = maxHistorySize;
+    this.maxDocumentLength = maxDocumentLength;
     this.collaboratorsByClientId = new Map();
     this.storeDebounceMs = storeDebounceMs;
     this.storeMaxDebounceMs = storeMaxDebounceMs;
@@ -78,12 +91,27 @@ export class DocumentSession {
       [operation] = transformOperation(operation, concurrentOperation);
     }
 
-    this.content = applyOperation(this.content, operation);
-    this.operationHistory.push(operation);
+    const updatedContent = applyOperation(this.content, operation);
+    if (updatedContent.length > this.maxDocumentLength) {
+      throw new InvalidOperationError(`Le document ne doit pas dépasser ${this.maxDocumentLength} caractères`);
+    }
+
+    this.content = updatedContent;
+    this.recordInHistory(operation);
     this.revision += 1;
     this.transformSelections(operation);
     this.scheduleStore();
     return { revision: this.revision, operation };
+  }
+
+  recordInHistory(operation) {
+    this.operationHistory.push(operation);
+    this.historySize += getOperationSize(operation);
+    while (this.operationHistory.length > this.maxHistoryLength || this.historySize > this.maxHistorySize) {
+      const forgottenOperation = this.operationHistory.shift();
+      this.historySize -= getOperationSize(forgottenOperation);
+      this.historyStartRevision += 1;
+    }
   }
 
   transformSelections(operation) {
@@ -122,6 +150,16 @@ export class DocumentSession {
       .catch((error) => console.error(`Sauvegarde du fichier ${this.fileId} impossible :`, error.message));
     return this.storeQueue;
   }
+}
+
+function getOperationSize(operation) {
+  let operationSize = operation.length;
+  for (const component of operation) {
+    if (typeof component.insert === 'string') {
+      operationSize += component.insert.length;
+    }
+  }
+  return operationSize;
 }
 
 function parsePointer(pointer) {

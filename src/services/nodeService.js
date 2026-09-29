@@ -9,6 +9,7 @@ function toNodeResponse(nodeRow) {
     parentId: nodeRow.parent_id,
     type: nodeRow.type,
     name: nodeRow.name,
+    ownerId: nodeRow.owner_id,
     createdAt: nodeRow.created_at,
     updatedAt: nodeRow.updated_at,
   };
@@ -47,7 +48,7 @@ async function withTransaction(transactionCallback) {
 
 async function findNodeById(nodeId, connection = pool) {
   const [nodeRows] = await connection.query(
-    'SELECT id, parent_id, type, name, created_at, updated_at FROM nodes WHERE id = ?',
+    'SELECT id, parent_id, type, name, owner_id, created_at, updated_at FROM nodes WHERE id = ?',
     [nodeId],
   );
   return nodeRows[0] ?? null;
@@ -140,15 +141,15 @@ export async function getNode(nodeId) {
   return toNodeResponse(await getExistingNode(nodeId));
 }
 
-export async function createNode({ parentId, type, name, content }) {
+export async function createNode({ parentId, type, name, content, ownerId }) {
   return withTransaction(async (connection) => {
     if (parentId !== null) {
       await getExistingParentFolder(parentId, connection);
     }
 
     const [insertResult] = await connection.query(
-      'INSERT INTO nodes (parent_id, type, name) VALUES (?, ?, ?)',
-      [parentId, type, name],
+      'INSERT INTO nodes (parent_id, type, name, owner_id) VALUES (?, ?, ?, ?)',
+      [parentId, type, name, ownerId],
     );
 
     if (type === 'file') {

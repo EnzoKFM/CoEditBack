@@ -19,16 +19,6 @@ CREATE TABLE IF NOT EXISTS users (
   UNIQUE KEY uq_users_email (email)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
--- Admin par défaut : admin@coedit.local / Admin1234! (à changer après la première connexion)
-INSERT IGNORE INTO users (email, password_hash, first_name, last_name, role)
-VALUES (
-  'admin@coedit.local',
-  '$2b$12$JNnbKxuRSG7eaI.HM4oU1Op2AxLh0enPmvkaVBbCMmISTYl9HUUOS',
-  'Admin',
-  'Coedit',
-  'admin'
-);
-
 CREATE TABLE IF NOT EXISTS nodes (
   id INT UNSIGNED NOT NULL AUTO_INCREMENT,
   parent_id INT UNSIGNED NULL,
@@ -41,7 +31,8 @@ CREATE TABLE IF NOT EXISTS nodes (
   PRIMARY KEY (id),
   UNIQUE KEY uq_nodes_parent_name (parent_key, name),
   KEY idx_nodes_parent (parent_id),
-  CONSTRAINT fk_nodes_parent FOREIGN KEY (parent_id) REFERENCES nodes (id) ON DELETE CASCADE
+  CONSTRAINT fk_nodes_parent FOREIGN KEY (parent_id) REFERENCES nodes (id) ON DELETE CASCADE,
+  CONSTRAINT fk_nodes_owner FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE SET NULL
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
 CREATE TABLE IF NOT EXISTS file_contents (

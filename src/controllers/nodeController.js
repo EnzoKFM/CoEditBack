@@ -25,6 +25,7 @@ export async function createNode(request, response) {
     type,
     name: validateNodeName(requestBody.name),
     content: type === 'file' ? validateContent(requestBody.content ?? '') : null,
+    ownerId: request.user.id,
   });
   response.status(201).json(createdNode);
 }

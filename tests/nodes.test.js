@@ -5,6 +5,7 @@ import { createAuthenticatedAgent, deleteTestUser } from './authHelper.js';
 import { closeDatabase, resetDatabase } from './databaseHelper.js';
 
 const NODES_TEST_EMAIL = 'nodes@coedit.test';
+const FORMER_AUTHOR_EMAIL = 'ancien-auteur@coedit.test';
 let authenticatedAgent;
 
 beforeAll(async () => {
@@ -121,6 +122,27 @@ describe('POST /api/nodes', () => {
     expect(creationResponse.body.type).toBe('folder');
     expect(creationResponse.body.name).toBe('MonDossier');
     expect(creationResponse.body.parentId).toBeNull();
+  });
+
+  it("enregistre l'utilisateur connecté comme auteur de l'élément", async () => {
+    const currentUser = (await authenticatedAgent.get('/api/auth/me')).body.user;
+
+    const creationResponse = await createFile('Auteur.txt');
+    const nodeResponse = await authenticatedAgent.get(`/api/nodes/${creationResponse.body.id}`);
+
+    expect(creationResponse.body.ownerId).toBe(currentUser.id);
+    expect(nodeResponse.body.ownerId).toBe(currentUser.id);
+  });
+
+  it("conserve l'élément sans auteur quand le compte de l'auteur est supprimé", async () => {
+    const formerAuthorAgent = await createAuthenticatedAgent(FORMER_AUTHOR_EMAIL);
+    const createdFolder = (await formerAuthorAgent.post('/api/nodes').send({ type: 'folder', name: 'Orphelin' })).body;
+
+    await deleteTestUser(FORMER_AUTHOR_EMAIL);
+    const nodeResponse = await authenticatedAgent.get(`/api/nodes/${createdFolder.id}`);
+
+    expect(nodeResponse.status).toBe(200);
+    expect(nodeResponse.body.ownerId).toBeNull();
   });
 
   it('crée un fichier et renvoie 201', async () => {

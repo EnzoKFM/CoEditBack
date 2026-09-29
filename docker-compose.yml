@@ -2,7 +2,7 @@ services:
   mysql:
     image: mysql:8.4
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-root}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD doit être défini dans .env}
       MYSQL_DATABASE: ${DB_NAME:-coedit}
     ports:
       - "${DB_EXPOSED_PORT:-3306}:3306"
@@ -25,10 +25,12 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-}
       JWT_SECRET: ${JWT_SECRET}
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       DB_HOST: mysql
       DB_PORT: 3306
       DB_USER: root
-      DB_PASSWORD: ${DB_PASSWORD:-root}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD doit être défini dans .env}
       DB_NAME: ${DB_NAME:-coedit}
       DB_TEST_NAME: ${DB_TEST_NAME:-coedit_test}
     ports:
