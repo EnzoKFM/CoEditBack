@@ -1,20 +1,23 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import request from 'supertest';
 import { io as createSocketClient } from 'socket.io-client';
 import { app } from '../src/app.js';
 import { createCollaboration } from '../src/collaboration/collaborationServer.js';
 import { applyOperation, parseOperation, transformOperation } from '../src/collaboration/textOperation.js';
+import { createAuthenticatedAgent, deleteTestUser, loginAndGetSessionCookie } from './authHelper.js';
 import { closeDatabase, resetDatabase } from './databaseHelper.js';
 
 const STORE_DEBOUNCE_MS = 50;
 const STORE_MAX_DEBOUNCE_MS = 200;
 const WAIT_FOR_TIMEOUT_MS = 3000;
 const WAIT_FOR_INTERVAL_MS = 20;
+const COLLABORATION_TEST_EMAIL = 'collaboration@coedit.test';
 
 let httpServer;
 let io;
 let serverPort;
 let connectedSockets = [];
+let authenticatedAgent;
+let sessionCookie;
 
 beforeAll(async () => {
   httpServer = app.listen(0);
@@ -24,10 +27,13 @@ beforeAll(async () => {
     storeDebounceMs: STORE_DEBOUNCE_MS,
     storeMaxDebounceMs: STORE_MAX_DEBOUNCE_MS,
   }).attachToHttpServer(httpServer);
+  authenticatedAgent = await createAuthenticatedAgent(COLLABORATION_TEST_EMAIL);
+  sessionCookie = await loginAndGetSessionCookie(COLLABORATION_TEST_EMAIL);
 });
 
 afterAll(async () => {
   await new Promise((resolve) => io.close(resolve));
+  await deleteTestUser(COLLABORATION_TEST_EMAIL);
   await closeDatabase();
 });
 
@@ -41,15 +47,18 @@ afterEach(() => {
 });
 
 async function createFolder(name, parentId = null) {
-  return request(app).post('/api/nodes').send({ type: 'folder', name, parentId });
+  return authenticatedAgent.post('/api/nodes').send({ type: 'folder', name, parentId });
 }
 
 async function createFile(name, parentId = null, content = '') {
-  return request(app).post('/api/nodes').send({ type: 'file', name, parentId, content });
+  return authenticatedAgent.post('/api/nodes').send({ type: 'file', name, parentId, content });
 }
 
-function connectClient() {
-  const socket = createSocketClient(`http://localhost:${serverPort}`, { transports: ['websocket'] });
+function connectClient(cookie = sessionCookie) {
+  const socket = createSocketClient(`http://localhost:${serverPort}`, {
+    transports: ['websocket'],
+    extraHeaders: cookie ? { cookie } : {},
+  });
   connectedSockets.push(socket);
   return new Promise((resolve, reject) => {
     socket.once('connect', () => resolve(socket));
@@ -101,6 +110,21 @@ function sendOperationAsClient(socket, clientState, operation) {
     });
   });
 }
+
+describe('authentification Socket.IO', () => {
+  it('refuse une connexion sans cookie de session', async () => {
+    await expect(connectClient(null)).rejects.toThrow('Non authentifié');
+  });
+
+  it('refuse une connexion avec un cookie falsifié', async () => {
+    await expect(connectClient('token=faux.jeton.jwt')).rejects.toThrow('Non authentifié');
+  });
+
+  it('accepte une connexion avec une session valide', async () => {
+    const socket = await connectClient();
+    expect(socket.connected).toBe(true);
+  });
+});
 
 describe('document:join', () => {
   it("renvoie le contenu et la révision issus de la création REST", async () => {
@@ -204,7 +228,7 @@ describe('document:operation', () => {
 
     await vi.waitFor(
       async () => {
-        const contentResponse = await request(app).get(`/api/files/${createdFile.id}/content`);
+        const contentResponse = await authenticatedAgent.get(`/api/files/${createdFile.id}/content`);
         expect(contentResponse.body.content).toBe(clientStateA.content);
       },
       { timeout: WAIT_FOR_TIMEOUT_MS, interval: WAIT_FOR_INTERVAL_MS },
@@ -318,13 +342,13 @@ describe('sauvegarde', () => {
 
     await vi.waitFor(
       async () => {
-        const contentResponse = await request(app).get(`/api/files/${createdFile.id}/content`);
+        const contentResponse = await authenticatedAgent.get(`/api/files/${createdFile.id}/content`);
         expect(contentResponse.body.content).toBe(expectedContent);
       },
       { timeout: WAIT_FOR_TIMEOUT_MS, interval: WAIT_FOR_INTERVAL_MS },
     );
 
-    const listingResponse = await request(app).get('/api/folders/root/children');
+    const listingResponse = await authenticatedAgent.get('/api/folders/root/children');
     const savedFileChild = listingResponse.body.children.find((childNode) => childNode.id === createdFile.id);
     expect(savedFileChild.size).toBe(expectedContent.length);
   });
@@ -346,7 +370,7 @@ describe('sauvegarde', () => {
 
     await vi.waitFor(
       async () => {
-        const contentResponse = await request(app).get(`/api/files/${createdFile.id}/content`);
+        const contentResponse = await authenticatedAgent.get(`/api/files/${createdFile.id}/content`);
         expect(contentResponse.body.content).toBe(expectedContent);
       },
       { timeout: WAIT_FOR_TIMEOUT_MS, interval: WAIT_FOR_INTERVAL_MS },

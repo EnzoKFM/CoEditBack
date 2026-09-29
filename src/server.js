@@ -2,6 +2,11 @@ import 'dotenv/config';
 import { app } from './app.js';
 import { createCollaboration } from './collaboration/collaborationServer.js';
 import { pool } from './db.js';
+import { checkEncryptionKey } from './lib/encryption.js';
+import { checkJwtSecret } from './lib/jwt.js';
+
+checkJwtSecret();
+checkEncryptionKey();
 
 const PORT = process.env.PORT || 3000;
 
