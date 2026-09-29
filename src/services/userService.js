@@ -37,6 +37,11 @@ export async function findUserById(userId) {
   return userRows[0] ?? null;
 }
 
+export async function hasAdminUser() {
+  const [adminRows] = await pool.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1");
+  return adminRows.length > 0;
+}
+
 export async function listUsers() {
   const [userRows] = await pool.execute('SELECT * FROM users ORDER BY last_name, first_name, id');
   return userRows;

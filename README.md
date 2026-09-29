@@ -7,7 +7,7 @@ API de CoEdit : authentification, stockage de documents texte rangés dans une a
 Le back et MySQL 8.4 tournent dans Docker ; le front tourne sur l'hôte.
 
 ```bash
-cp .env.example .env
+cp .env.example .env   # renseigner au moins DB_PASSWORD, JWT_SECRET, TOTP_ENCRYPTION_KEY, ADMIN_EMAIL et ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
@@ -17,7 +17,9 @@ docker compose up -d --build
 
 Réappliquer le schéma (idempotent) : `docker compose exec back npm run db:init`. **À faire si le volume MySQL existait avant l'ajout de la table `users`** : le schéma n'est appliqué automatiquement qu'à la création du volume.
 
-Compte administrateur créé par le schéma : `admin@coedit.local` / `Admin1234!` (à changer).
+Premier administrateur : au démarrage, s'il n'existe aucun compte `admin`, l'API en crée un à partir de `ADMIN_EMAIL` et `ADMIN_PASSWORD` (mot de passe soumis aux règles habituelles). Le schéma ne crée plus aucun compte : sur un volume antérieur, supprimer `admin@coedit.local` ou changer son mot de passe à la main.
+
+Arrêt : sur `SIGTERM`, `SIGINT` ou `SIGUSR2` (dont le redémarrage de nodemon), l'API sauvegarde les documents ouverts avant de s'arrêter.
 
 ## Tests
 
@@ -37,7 +39,9 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 | `TRUST_PROXY` | Nombre de reverse proxies devant l'API (ex. `1` derrière Traefik ou Nginx), vide sinon. Sans lui derrière un proxy, tous les visiteurs partagent la même IP pour la limitation des tentatives |
 | `JWT_SECRET` | Clé de signature des sessions, **obligatoire, au moins 32 caractères**, propre à chaque environnement |
 | `TOTP_ENCRYPTION_KEY` | Clé de chiffrement des secrets 2FA, **obligatoire, 64 caractères hexadécimaux**. La changer rend inutilisables les 2FA déjà activées |
-| `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD` | Connexion MySQL (forcées par `docker-compose.yml` dans le conteneur) |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | Premier administrateur, créé au démarrage s'il n'en existe aucun ; ignorées ensuite |
+| `DB_HOST`, `DB_PORT`, `DB_USER` | Connexion MySQL (forcées par `docker-compose.yml` dans le conteneur) |
+| `DB_PASSWORD` | Mot de passe MySQL, **obligatoire** : `docker compose` refuse de démarrer sans lui. Il sert aussi de mot de passe `root` à la création du volume |
 | `DB_NAME` | Base applicative |
 | `DB_TEST_NAME` | Base des tests |
 | `DB_EXPOSED_PORT` | Port MySQL publié sur l'hôte |
@@ -45,7 +49,7 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 ## Modèle de données
 
 - `users` : comptes (`role` = `user` | `admin`), mot de passe haché avec bcrypt. `is_blocked` empêche la connexion et la navigation sur le site; `token_version` invalide les sessions ouvertes quand il est incrémenté (déconnexion, changement de mot de passe). 2FA : `totp_secret` (chiffré en AES-256-GCM, jamais en clair), `totp_enabled`, et `totp_last_time_step` (dernier créneau de 30 s accepté, pour qu'un code ne serve qu'une fois).
-- `nodes` : dossiers et fichiers (`type` = `folder` | `file`), rattachés à leur parent par `parent_id` (`NULL` = racine). Deux éléments d'un même dossier ne peuvent pas porter le même nom (comparaison insensible à la casse, sensible aux accents). `owner_id` est réservé à la future authentification.
+- `nodes` : dossiers et fichiers (`type` = `folder` | `file`), rattachés à leur parent par `parent_id` (`NULL` = racine). Deux éléments d'un même dossier ne peuvent pas porter le même nom (comparaison insensible à la casse, sensible aux accents). `owner_id` est l'auteur de l'élément (l'utilisateur qui l'a créé), remis à `NULL` si son compte est supprimé ; il ne restreint pas l'accès : l'arborescence est un espace commun, où tout utilisateur connecté voit et modifie tous les dossiers et fichiers.
 - `file_contents` : texte du document (`content`), `revision` (nombre d'opérations appliquées, voir la collaboration) et `version` (incrémentée à chaque sauvegarde).
 
 ## API
@@ -121,8 +125,8 @@ Toutes les routes de documents exigent une session (401 sinon).
 |---|---|---|---|
 | GET | `/api/folders/root/children` | | Contenu de la racine |
 | GET | `/api/folders/:folderId/children` | | Contenu d'un dossier |
-| POST | `/api/nodes` | `{ parentId, type, name, content? }` | 201 + élément créé |
-| GET | `/api/nodes/:nodeId` | | Métadonnées de l'élément |
+| POST | `/api/nodes` | `{ parentId, type, name, content? }` | 201 + élément créé, avec l'utilisateur connecté pour auteur |
+| GET | `/api/nodes/:nodeId` | | Métadonnées de l'élément : `{ id, parentId, type, name, ownerId, createdAt, updatedAt }` |
 | PATCH | `/api/nodes/:nodeId` | `{ name?, parentId? }` | Élément renommé et/ou déplacé |
 | DELETE | `/api/nodes/:nodeId` | | 204, descendants compris |
 | GET | `/api/files/:fileId/content` | | `{ content, version, updatedAt }` |
@@ -193,6 +197,13 @@ Une opération décrit tout le document, dans l'ordre, sous forme d'une liste de
 ### Sauvegarde
 
 Le serveur sauvegarde lui-même : 2 s après la dernière opération, au plus tard toutes les 10 s pendant une frappe continue, et tout de suite quand le dernier éditeur quitte le document. Le front n'a rien à enregistrer.
+
+### Limites
+
+- Un document ne peut pas dépasser 5 000 000 de caractères : l'opération qui le ferait dépasser est refusée (`{ error }`).
+- Le serveur garde en mémoire les 1 000 dernières opérations (1 000 000 de caractères au plus) de chaque document ; une opération écrite sur une révision plus ancienne reçoit `isResyncRequired: true`.
+- 100 messages par seconde et par utilisateur, tous événements confondus ; au-delà, le message est ignoré et son accusé reçoit `{ error: 'Trop de messages envoyés : réessayez dans un instant' }`.
+- Un message Socket.IO ne peut pas dépasser 1 Mo.
 
 ## Appels audio (WebRTC)
 

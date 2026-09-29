@@ -4,9 +4,16 @@ import { authenticateSocket } from '../middlewares/auth.js';
 import { findFileDocument } from '../services/nodeService.js';
 import { AudioCallRegistry, getPeerClientId } from './audioCallRegistry.js';
 import { DocumentSession, ResyncRequiredError } from './documentSession.js';
+import { createEventRateLimiter } from './eventRateLimiter.js';
 
 const DEFAULT_STORE_DEBOUNCE_MS = 2000;
 const DEFAULT_STORE_MAX_DEBOUNCE_MS = 10000;
+const DEFAULT_MAX_HISTORY_LENGTH = 1000;
+const DEFAULT_MAX_HISTORY_SIZE = 1000000;
+const DEFAULT_MAX_DOCUMENT_LENGTH = 5000000;
+const DEFAULT_SOCKET_EVENT_LIMIT = 100;
+const DEFAULT_SOCKET_EVENT_WINDOW_MS = 1000;
+const MAX_SOCKET_MESSAGE_BYTES = 1000000;
 const MAX_USER_NAME_LENGTH = 100;
 const MAX_USER_COLOR_LENGTH = 32;
 const DEFAULT_USER_NAME = 'Anonyme';
@@ -58,9 +65,16 @@ function toRoomName(fileId) {
 export function createCollaboration({
   storeDebounceMs = DEFAULT_STORE_DEBOUNCE_MS,
   storeMaxDebounceMs = DEFAULT_STORE_MAX_DEBOUNCE_MS,
+  maxHistoryLength = DEFAULT_MAX_HISTORY_LENGTH,
+  maxHistorySize = DEFAULT_MAX_HISTORY_SIZE,
+  maxDocumentLength = DEFAULT_MAX_DOCUMENT_LENGTH,
+  socketEventLimit = DEFAULT_SOCKET_EVENT_LIMIT,
+  socketEventWindowMs = DEFAULT_SOCKET_EVENT_WINDOW_MS,
 } = {}) {
   const sessionPromisesByFileId = new Map();
   const audioCallRegistry = new AudioCallRegistry();
+  const isSocketEventAllowed = createEventRateLimiter({ maxEvents: socketEventLimit, windowMs: socketEventWindowMs });
+  let socketServer = null;
 
   function loadSession(fileId) {
     const existingSessionPromise = sessionPromisesByFileId.get(fileId);
@@ -78,6 +92,9 @@ export function createCollaboration({
         revision: fileDocument.revision,
         storeDebounceMs,
         storeMaxDebounceMs,
+        maxHistoryLength,
+        maxHistorySize,
+        maxDocumentLength,
       });
     });
     sessionPromisesByFileId.set(fileId, sessionPromise);
@@ -98,7 +115,11 @@ export function createCollaboration({
   }
 
   function attachToHttpServer(httpServer) {
-    const io = new Server(httpServer, { cors: { origin: process.env.CLIENT_URL, credentials: true } });
+    const io = new Server(httpServer, {
+      cors: { origin: process.env.CLIENT_URL, credentials: true },
+      maxHttpBufferSize: MAX_SOCKET_MESSAGE_BYTES,
+    });
+    socketServer = io;
     io.engine.use(cookieParser());
     io.use(authenticateSocket);
 
@@ -131,6 +152,17 @@ export function createCollaboration({
     }
 
     io.on('connection', (socket) => {
+      socket.use(([, ...eventArguments], next) => {
+        if (isSocketEventAllowed(socket.data.user.id)) {
+          next();
+          return;
+        }
+        const acknowledge = eventArguments.at(-1);
+        if (typeof acknowledge === 'function') {
+          acknowledge({ error: 'Trop de messages envoyés : réessayez dans un instant' });
+        }
+      });
+
       socket.on('document:join', async (joinRequest, acknowledge) => {
         if (typeof acknowledge !== 'function') {
           return;
@@ -246,5 +278,15 @@ export function createCollaboration({
     return io;
   }
 
-  return { attachToHttpServer };
+  async function close() {
+    const sessionPromises = [...sessionPromisesByFileId.values()];
+    socketServer?.close();
+    const sessionResults = await Promise.allSettled(sessionPromises);
+    const loadedSessions = sessionResults
+      .filter((sessionResult) => sessionResult.status === 'fulfilled')
+      .map((sessionResult) => sessionResult.value);
+    await Promise.all(loadedSessions.map((loadedSession) => loadedSession.store()));
+  }
+
+  return { attachToHttpServer, close };
 }

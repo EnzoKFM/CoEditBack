@@ -54,8 +54,16 @@ async function createFile(name, parentId = null, content = '') {
   return authenticatedAgent.post('/api/nodes').send({ type: 'file', name, parentId, content });
 }
 
-function connectClient(cookie = sessionCookie) {
-  const socket = createSocketClient(`http://localhost:${serverPort}`, {
+async function startDedicatedCollaboration(collaborationOptions) {
+  const dedicatedHttpServer = app.listen(0);
+  await new Promise((resolve) => dedicatedHttpServer.once('listening', resolve));
+  const collaboration = createCollaboration(collaborationOptions);
+  const socketServer = collaboration.attachToHttpServer(dedicatedHttpServer);
+  return { collaboration, socketServer, port: dedicatedHttpServer.address().port };
+}
+
+function connectClient(cookie = sessionCookie, port = serverPort) {
+  const socket = createSocketClient(`http://localhost:${port}`, {
     transports: ['websocket'],
     extraHeaders: cookie ? { cookie } : {},
   });
@@ -619,5 +627,58 @@ describe('appel audio', () => {
 
     expect(secondInviteAcknowledgement.error).toBeUndefined();
     expect(incomingSecondCallPayload.callId).toBe(secondInviteAcknowledgement.callId);
+  });
+});
+
+describe('limitation du débit des sockets', () => {
+  it("refuse les messages d'un utilisateur au-delà de la limite de la fenêtre", async () => {
+    const { socketServer, port } = await startDedicatedCollaboration({
+      storeDebounceMs: STORE_DEBOUNCE_MS,
+      storeMaxDebounceMs: STORE_MAX_DEBOUNCE_MS,
+      socketEventLimit: 2,
+      socketEventWindowMs: 60000,
+    });
+    try {
+      const createdFile = (await createFile('debit.txt', null, 'abc')).body;
+      const socket = await connectClient(sessionCookie, port);
+      const joinAcknowledgement = await joinDocument(socket, createdFile.id, { name: 'Alice' });
+
+      const acceptedAcknowledgement = await socket.emitWithAck('document:operation', {
+        revision: joinAcknowledgement.revision,
+        operation: [{ retain: 3 }, { insert: 'd' }],
+      });
+      const rejectedAcknowledgement = await socket.emitWithAck('document:operation', {
+        revision: acceptedAcknowledgement.revision,
+        operation: [{ retain: 4 }, { insert: 'e' }],
+      });
+
+      expect(acceptedAcknowledgement.error).toBeUndefined();
+      expect(rejectedAcknowledgement.error).toBe('Trop de messages envoyés : réessayez dans un instant');
+    } finally {
+      await new Promise((resolve) => socketServer.close(resolve));
+    }
+  });
+});
+
+describe('arrêt du serveur de collaboration', () => {
+  it("sauvegarde les modifications encore en attente avant de fermer", async () => {
+    const { collaboration, port } = await startDedicatedCollaboration({
+      storeDebounceMs: 60000,
+      storeMaxDebounceMs: 60000,
+    });
+    const createdFile = (await createFile('arret.txt', null, 'abc')).body;
+    const socket = await connectClient(sessionCookie, port);
+    const joinAcknowledgement = await joinDocument(socket, createdFile.id, { name: 'Alice' });
+    await socket.emitWithAck('document:operation', {
+      revision: joinAcknowledgement.revision,
+      operation: [{ retain: 3 }, { insert: 'd' }],
+    });
+    const contentBeforeClose = await authenticatedAgent.get(`/api/files/${createdFile.id}/content`);
+
+    await collaboration.close();
+
+    const contentAfterClose = await authenticatedAgent.get(`/api/files/${createdFile.id}/content`);
+    expect(contentBeforeClose.body.content).toBe('abc');
+    expect(contentAfterClose.body.content).toBe('abcd');
   });
 });
