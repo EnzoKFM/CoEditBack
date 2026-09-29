@@ -13,6 +13,7 @@ docker compose up -d --build
 
 - API : http://localhost:3000 (`GET /api/health`).
 - MySQL est exposé sur le port `DB_EXPOSED_PORT` (3306 par défaut). Le schéma `sql/schema.sql` est appliqué automatiquement au premier démarrage du volume.
+- phpMyAdmin : http://localhost:8080 (`PHPMYADMIN_PORT`), pour consulter et modifier la base. Se connecter avec l'utilisateur `root` et le mot de passe `DB_PASSWORD` du `.env`. Il n'est accessible que depuis la machine qui fait tourner Docker (ni depuis le réseau local, ni via ngrok) : il donne un accès complet à la base.
 - `src/`, `sql/` et `tests/` sont montés dans le conteneur ; `nodemon` recharge l'API à chaque modification.
 
 Réappliquer le schéma (idempotent) : `docker compose exec back npm run db:init`. **À faire si le volume MySQL existait avant l'ajout de la table `users`** : le schéma n'est appliqué automatiquement qu'à la création du volume.
@@ -45,6 +46,7 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 | `DB_NAME` | Base applicative |
 | `DB_TEST_NAME` | Base des tests |
 | `DB_EXPOSED_PORT` | Port MySQL publié sur l'hôte |
+| `PHPMYADMIN_PORT` | Port de phpMyAdmin sur l'hôte (8080 par défaut) |
 
 ## Modèle de données
 
