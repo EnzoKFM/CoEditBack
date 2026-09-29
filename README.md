@@ -176,7 +176,7 @@ Une opération décrit tout le document, dans l'ordre, sous forme d'une liste de
 
 | Sens | Événement | Contenu |
 |---|---|---|
-| client → serveur | `document:join` (ack) | `{ fileId, user: { name, color } }` → `{ clientId, content, revision, collaborators }` ou `{ error }` |
+| client → serveur | `document:join` (ack) | `{ fileId, user: { name, color } }` → `{ clientId, content, revision, collaborators, capabilities: { snapshotSave: true } }` ou `{ error }` |
 | client → serveur | `document:operation` (ack) | `{ revision, operation }` → `{ revision }` ou `{ error, isResyncRequired }` |
 | client → serveur | `presence:update` | `{ selection: { anchor, head } \| null, pointer: { x, y } \| null }` |
 | client → serveur | `document:leave` | |
@@ -198,7 +198,7 @@ Une opération décrit tout le document, dans l'ordre, sous forme d'une liste de
 
 ### Sauvegarde
 
-Le serveur sauvegarde lui-même : 2 s après la dernière opération, au plus tard toutes les 10 s pendant une frappe continue, et tout de suite quand le dernier éditeur quitte le document. Le front n'a rien à enregistrer.
+Le serveur sauvegarde lui-même : 2 s après la dernière opération, au plus tard toutes les 10 s pendant une frappe continue, et tout de suite quand le dernier éditeur quitte le document. Le bouton de sauvegarde du front peut aussi demander une persistance immédiate avec `persist: true`.
 
 ### Limites
 
@@ -238,3 +238,21 @@ Deux collaborateurs d'un même document peuvent s'appeler en tête-à-tête. L'a
 5. À `call:ended` ou en raccrochant : fermer le `RTCPeerConnection` et arrêter les pistes micro.
 
 Le `RTCPeerConnection` doit être configuré avec au moins un serveur STUN (par exemple `stun:stun.l.google.com:19302`) ; un serveur TURN sera nécessaire derrière les réseaux qui bloquent le pair-à-pair.
+
+### Sauvegarde manuelle du texte riche
+
+Le front peut envoyer `document:operation` avec `{ revision, expectedRevision, persist: true, operation }`.
+`expectedRevision` et `revision` doivent alors correspondre à la révision courante. Sinon, le serveur
+répond `{ error, isConflict: true }` sans appliquer l’opération. Ce contrôle est synchrone,
+avant toute sauvegarde, pour éviter de fusionner deux remplacements complets d’un document.
+
+Avec `persist: true`, l’accusé `{ revision, persisted: true }` arrive après `DocumentSession.store()`
+et vérification de la révision en base. En cas d’échec, `{ revision, persisted: false, error }`
+indique que l’opération a été appliquée en mémoire mais que sa sauvegarde n’est pas confirmée.
+Le client conserve ses modifications et peut réessayer depuis la révision reçue.
+Les opérations existantes sans ces options gardent leur fonctionnement habituel.
+
+Le front stocke sa mise en forme sous forme de JSON Tiptap précédé de `COEDIT_RICH_TEXT_V1\n`.
+Le serveur conserve cette chaîne dans `file_contents.content`, sans nouvelle colonne ni migration.
+Ce mode protège les sauvegardes complètes ; il ne fusionne pas les frappes simultanées en texte riche.
+Aucune route REST d’écriture du contenu n’est ajoutée.

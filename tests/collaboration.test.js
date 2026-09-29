@@ -682,3 +682,50 @@ describe('arrêt du serveur de collaboration', () => {
     expect(contentAfterClose.body.content).toBe('abcd');
   });
 });
+
+describe('sauvegarde explicite', () => {
+  it('confirme la persistance avant de répondre au client', async () => {
+    const createdFile = (await createFile('enregistrement.txt', null, 'avant')).body;
+    const socket = await connectClient();
+    const joined = await joinDocument(socket, createdFile.id, { name: 'Alice' });
+    expect(joined.capabilities?.snapshotSave).toBe(true);
+
+    const acknowledgement = await socket.emitWithAck('document:operation', {
+      revision: 0, expectedRevision: 0, persist: true,
+      operation: [{ insert: 'après' }, { delete: 5 }],
+    });
+    expect(acknowledgement).toEqual({ revision: 1, persisted: true });
+    const stored = await authenticatedAgent.get(`/api/files/${createdFile.id}/content`);
+    expect(stored.body.content).toBe('après');
+  });
+
+  it('refuse une sauvegarde obsolète sans fusionner les contenus', async () => {
+    const createdFile = (await createFile('conflit.txt')).body;
+    const firstSocket = await connectClient();
+    const secondSocket = await connectClient();
+    await joinDocument(firstSocket, createdFile.id, { name: 'Alice' });
+    await joinDocument(secondSocket, createdFile.id, { name: 'Bob' });
+    await firstSocket.emitWithAck('document:operation', {
+      revision: 0, expectedRevision: 0, persist: true, operation: [{ insert: 'Alice' }],
+    });
+    const refused = await secondSocket.emitWithAck('document:operation', {
+      revision: 0, expectedRevision: 0, persist: true, operation: [{ insert: 'Bob' }],
+    });
+    expect(refused.isConflict).toBe(true);
+    const current = await joinDocument(secondSocket, createdFile.id, { name: 'Bob' });
+    expect(current.content).toBe('Alice');
+    expect(current.revision).toBe(1);
+  });
+
+  it('ne confirme pas la persistance si le fichier a été supprimé', async () => {
+    const createdFile = (await createFile('supprime.txt')).body;
+    const socket = await connectClient();
+    await joinDocument(socket, createdFile.id, { name: 'Alice' });
+    await authenticatedAgent.delete(`/api/nodes/${createdFile.id}`);
+    const acknowledgement = await socket.emitWithAck('document:operation', {
+      revision: 0, expectedRevision: 0, persist: true, operation: [{ insert: 'perdu' }],
+    });
+    expect(acknowledgement.persisted).toBe(false);
+    expect(acknowledgement.error).toBeDefined();
+  });
+});

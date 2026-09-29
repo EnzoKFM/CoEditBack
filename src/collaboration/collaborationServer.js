@@ -178,6 +178,7 @@ export function createCollaboration({
           acknowledge({
             clientId: socket.id,
             content: session.content,
+            capabilities: { snapshotSave: true },
             revision: session.revision,
             collaborators: session
               .listCollaborators()
@@ -198,6 +199,11 @@ export function createCollaboration({
           return;
         }
         try {
+          if (operationRequest?.expectedRevision !== undefined &&
+              (operationRequest.expectedRevision !== session.revision || operationRequest.revision !== session.revision)) {
+            acknowledge({ error: 'Le document a été modifié depuis son ouverture. Rechargez sa dernière version.', isConflict: true });
+            return;
+          }
           const { revision, operation } = session.receiveOperation(
             operationRequest?.revision,
             operationRequest?.operation,
@@ -207,7 +213,20 @@ export function createCollaboration({
             revision,
             operation,
           });
-          acknowledge({ revision });
+          if (operationRequest?.persist === true) {
+            session.store()
+              .then(() => findFileDocument(session.fileId))
+              .then((storedDocument) => {
+                if (!storedDocument || storedDocument.revision < revision) {
+                  acknowledge({ revision, persisted: false, error: 'La sauvegarde en base a échoué. Gardez cette page ouverte et réessayez.' });
+                  return;
+                }
+                acknowledge({ revision, persisted: true });
+              })
+              .catch(() => acknowledge({ revision, persisted: false, error: 'Impossible de confirmer la sauvegarde en base. Réessayez.' }));
+          } else {
+            acknowledge({ revision });
+          }
         } catch (error) {
           acknowledge({ error: error.message, isResyncRequired: error instanceof ResyncRequiredError });
         }
