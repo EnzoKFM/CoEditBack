@@ -2,6 +2,7 @@ import cookieParser from 'cookie-parser';
 import { Server } from 'socket.io';
 import { authenticateSocket } from '../middlewares/auth.js';
 import { findFileDocument } from '../services/nodeService.js';
+import { AudioCallRegistry, getPeerClientId } from './audioCallRegistry.js';
 import { DocumentSession, ResyncRequiredError } from './documentSession.js';
 
 const DEFAULT_STORE_DEBOUNCE_MS = 2000;
@@ -9,6 +10,9 @@ const DEFAULT_STORE_MAX_DEBOUNCE_MS = 10000;
 const MAX_USER_NAME_LENGTH = 100;
 const MAX_USER_COLOR_LENGTH = 32;
 const DEFAULT_USER_NAME = 'Anonyme';
+const MAX_SESSION_DESCRIPTION_LENGTH = 100000;
+const MAX_ICE_CANDIDATE_LENGTH = 2000;
+const SESSION_DESCRIPTION_TYPES = new Set(['offer', 'answer']);
 
 function parseFileId(rawFileId) {
   const fileId = Number(rawFileId);
@@ -24,6 +28,29 @@ function parseUser(rawUser) {
   return { name: userName || DEFAULT_USER_NAME, color: userColor };
 }
 
+function parseCallSignal(signalRequest) {
+  const description = signalRequest?.description;
+  if (description) {
+    const isValidDescription =
+      SESSION_DESCRIPTION_TYPES.has(description.type) &&
+      typeof description.sdp === 'string' &&
+      description.sdp.length <= MAX_SESSION_DESCRIPTION_LENGTH;
+    return isValidDescription ? { description: { type: description.type, sdp: description.sdp } } : null;
+  }
+  const candidate = signalRequest?.candidate;
+  if (candidate && typeof candidate.candidate === 'string' && candidate.candidate.length <= MAX_ICE_CANDIDATE_LENGTH) {
+    return {
+      candidate: {
+        candidate: candidate.candidate,
+        sdpMid: typeof candidate.sdpMid === 'string' ? candidate.sdpMid : null,
+        sdpMLineIndex: Number.isInteger(candidate.sdpMLineIndex) ? candidate.sdpMLineIndex : null,
+        usernameFragment: typeof candidate.usernameFragment === 'string' ? candidate.usernameFragment : null,
+      },
+    };
+  }
+  return null;
+}
+
 function toRoomName(fileId) {
   return `file:${fileId}`;
 }
@@ -33,6 +60,7 @@ export function createCollaboration({
   storeMaxDebounceMs = DEFAULT_STORE_MAX_DEBOUNCE_MS,
 } = {}) {
   const sessionPromisesByFileId = new Map();
+  const audioCallRegistry = new AudioCallRegistry();
 
   function loadSession(fileId) {
     const existingSessionPromise = sessionPromisesByFileId.get(fileId);
@@ -74,11 +102,25 @@ export function createCollaboration({
     io.engine.use(cookieParser());
     io.use(authenticateSocket);
 
+    function hangUpCall(socket) {
+      const call = audioCallRegistry.findCallOfClient(socket.id);
+      if (!call) {
+        return;
+      }
+      audioCallRegistry.endCall(call);
+      const isDeclined = !call.isAccepted && call.calleeClientId === socket.id;
+      io.to(getPeerClientId(call, socket.id)).emit('call:ended', {
+        callId: call.callId,
+        reason: isDeclined ? 'declined' : 'hangup',
+      });
+    }
+
     async function leaveDocument(socket) {
       const session = socket.data.session;
       if (!session) {
         return;
       }
+      hangUpCall(socket);
       socket.data.session = null;
       session.removeCollaborator(socket.id);
       socket.leave(toRoomName(session.fileId));
@@ -146,6 +188,56 @@ export function createCollaboration({
           socket.to(toRoomName(session.fileId)).emit('presence:update', collaborator);
         }
       });
+
+      socket.on('call:invite', (inviteRequest, acknowledge) => {
+        if (typeof acknowledge !== 'function') {
+          return;
+        }
+        const session = socket.data.session;
+        if (!session) {
+          acknowledge({ error: 'Aucun document rejoint' });
+          return;
+        }
+        const callee = session.findCollaborator(inviteRequest?.targetClientId);
+        if (!callee) {
+          acknowledge({ error: 'Correspondant absent du document' });
+          return;
+        }
+        try {
+          const call = audioCallRegistry.startCall({ callerClientId: socket.id, calleeClientId: callee.clientId });
+          const caller = session.findCollaborator(socket.id);
+          io.to(callee.clientId).emit('call:incoming', {
+            callId: call.callId,
+            caller: { clientId: caller.clientId, user: caller.user },
+          });
+          acknowledge({ callId: call.callId });
+        } catch (error) {
+          acknowledge({ error: error.message });
+        }
+      });
+
+      socket.on('call:accept', (acceptRequest, acknowledge) => {
+        if (typeof acknowledge !== 'function') {
+          return;
+        }
+        try {
+          const call = audioCallRegistry.acceptCall(acceptRequest?.callId, socket.id);
+          io.to(call.callerClientId).emit('call:accepted', { callId: call.callId, clientId: socket.id });
+          acknowledge({ callId: call.callId });
+        } catch (error) {
+          acknowledge({ error: error.message });
+        }
+      });
+
+      socket.on('call:signal', (signalRequest) => {
+        const targetClientId = signalRequest?.targetClientId;
+        const callSignal = parseCallSignal(signalRequest);
+        if (callSignal && audioCallRegistry.isInAcceptedCallWith(socket.id, targetClientId)) {
+          io.to(targetClientId).emit('call:signal', { clientId: socket.id, ...callSignal });
+        }
+      });
+
+      socket.on('call:hangup', () => hangUpCall(socket));
 
       socket.on('document:leave', () => leaveDocument(socket));
       socket.on('disconnect', () => leaveDocument(socket));
