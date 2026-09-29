@@ -36,7 +36,7 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 | `PORT` | Port de l'API (3000) |
 | `CLIENT_URL` | Origine autorisée par CORS (front) |
 | `NODE_ENV` | `development` en local ; `production` ajoute l'attribut `Secure` aux cookies (HTTPS obligatoire) |
-| `TRUST_PROXY` | Nombre de reverse proxies devant l'API (ex. `1` derrière Traefik ou Nginx), vide sinon. Sans lui derrière un proxy, tous les visiteurs partagent la même IP pour la limitation des tentatives |
+| `TRUST_PROXY` | Nombre de reverse proxies devant l'API (ex. `1` derrière Traefik ou Nginx, `2` pour un test à plusieurs via ngrok + le proxy de Vite, voir le README du front), vide sinon. Sans lui derrière un proxy, tous les visiteurs partagent la même IP pour la limitation des tentatives. Ne pas le renseigner sans proxy : un client pourrait alors falsifier son IP via l'en-tête `X-Forwarded-For` |
 | `JWT_SECRET` | Clé de signature des sessions, **obligatoire, au moins 32 caractères**, propre à chaque environnement |
 | `TOTP_ENCRYPTION_KEY` | Clé de chiffrement des secrets 2FA, **obligatoire, 64 caractères hexadécimaux**. La changer rend inutilisables les 2FA déjà activées |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | Premier administrateur, créé au démarrage s'il n'en existe aucun ; ignorées ensuite |
