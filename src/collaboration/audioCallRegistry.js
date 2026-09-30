@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
-export const MAX_CALL_MEMBERS = 6;
+export const MAX_CALL_MEMBERS = 12;
+export const MAX_CALL_CAMERAS = 6;
 
 export class AudioCallRegistry {
   constructor() {
@@ -38,6 +39,7 @@ export class AudioCallRegistry {
       callId: randomUUID(),
       participantClientIds: new Set([callerClientId]),
       invitedClientIds: new Set(),
+      cameraClientIds: new Set(),
     };
     this.callsById.set(call.callId, call);
     this.callIdsByClientId.set(callerClientId, call.callId);
@@ -57,6 +59,7 @@ export class AudioCallRegistry {
   leaveCall(call, clientId) {
     const wasInvited = call.invitedClientIds.delete(clientId);
     call.participantClientIds.delete(clientId);
+    call.cameraClientIds.delete(clientId);
     this.callIdsByClientId.delete(clientId);
     const isEnded =
       call.participantClientIds.size === 0 || (call.participantClientIds.size === 1 && call.invitedClientIds.size === 0);
@@ -67,6 +70,17 @@ export class AudioCallRegistry {
       }
     }
     return { wasInvited, isEnded };
+  }
+
+  setCamera(call, clientId, isEnabled) {
+    if (!isEnabled) {
+      call.cameraClientIds.delete(clientId);
+      return;
+    }
+    if (!call.cameraClientIds.has(clientId) && call.cameraClientIds.size >= MAX_CALL_CAMERAS) {
+      throw new Error(`${MAX_CALL_CAMERAS} caméras sont déjà allumées dans cet appel`);
+    }
+    call.cameraClientIds.add(clientId);
   }
 
   isInAcceptedCallWith(clientId, peerClientId) {

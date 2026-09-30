@@ -347,6 +347,32 @@ export function createCollaboration({
         });
       });
 
+      socket.on('call:camera', (cameraRequest, acknowledge) => {
+        if (typeof acknowledge !== 'function') {
+          return;
+        }
+        const call = audioCallRegistry.findCallOfClient(socket.id);
+        if (!call?.participantClientIds.has(socket.id)) {
+          acknowledge({ error: "Vous n'êtes dans aucun appel" });
+          return;
+        }
+        if (typeof cameraRequest?.enabled !== 'boolean') {
+          acknowledge({ error: 'État de la caméra invalide' });
+          return;
+        }
+        try {
+          audioCallRegistry.setCamera(call, socket.id, cameraRequest.enabled);
+        } catch (error) {
+          acknowledge({ error: error.message });
+          return;
+        }
+        emitToClients(listOtherParticipants(call, socket.id), 'call:camera', {
+          clientId: socket.id,
+          enabled: cameraRequest.enabled,
+        });
+        acknowledge({ enabled: cameraRequest.enabled });
+      });
+
       socket.on('call:hangup', () => hangUpCall(socket));
 
       socket.on('document:leave', () => leaveDocument(socket));
