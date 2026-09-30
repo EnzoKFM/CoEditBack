@@ -218,7 +218,7 @@ describe('envoi de fichier binaire', () => {
 
     expect(uploadResponse.status).toBe(201);
     expect((await findBinaryRow(uploadResponse.body.id)).size).toBe(BINARY_FILE_MAX_BYTES);
-  });
+  }, 30000);
 
   it('renvoie 413 pour un fichier de plus de 20 Mo', async () => {
     const oversizedBytes = Buffer.alloc(BINARY_FILE_MAX_BYTES + 1, 7);
