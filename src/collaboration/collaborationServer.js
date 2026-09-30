@@ -1,7 +1,7 @@
 import cookieParser from 'cookie-parser';
 import { Server } from 'socket.io';
 import { authenticateSocket } from '../middlewares/auth.js';
-import { findFileDocument } from '../services/nodeService.js';
+import { findFileAccess, findFileDocument } from '../services/nodeService.js';
 import { AudioCallRegistry, getPeerClientId } from './audioCallRegistry.js';
 import { DocumentSession, ResyncRequiredError } from './documentSession.js';
 import { createEventRateLimiter } from './eventRateLimiter.js';
@@ -169,14 +169,20 @@ export function createCollaboration({
         }
         try {
           const fileId = parseFileId(joinRequest?.fileId);
+          const fileAccess = await findFileAccess(fileId, socket.data.user);
+          if (!fileAccess) {
+            throw new Error('Fichier introuvable');
+          }
           await leaveDocument(socket);
           const session = await loadSession(fileId);
           const collaborator = session.addCollaborator(socket.id, parseUser(joinRequest?.user));
           socket.data.session = session;
+          socket.data.canEditDocument = fileAccess.canEdit;
           socket.join(toRoomName(fileId));
           socket.to(toRoomName(fileId)).emit('presence:update', collaborator);
           acknowledge({
             clientId: socket.id,
+            permission: fileAccess.permission,
             content: session.content,
             revision: session.revision,
             collaborators: session
@@ -195,6 +201,10 @@ export function createCollaboration({
         const session = socket.data.session;
         if (!session) {
           acknowledge({ error: 'Aucun document rejoint' });
+          return;
+        }
+        if (!socket.data.canEditDocument) {
+          acknowledge({ error: "Vous n'avez pas le droit de modifier ce document" });
           return;
         }
         try {
