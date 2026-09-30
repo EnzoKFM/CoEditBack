@@ -51,7 +51,8 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 ## Modèle de données
 
 - `users` : comptes (`role` = `user` | `admin`), mot de passe haché avec bcrypt. `is_blocked` empêche la connexion et la navigation sur le site; `token_version` invalide les sessions ouvertes quand il est incrémenté (déconnexion, changement de mot de passe). 2FA : `totp_secret` (chiffré en AES-256-GCM, jamais en clair), `totp_enabled`, et `totp_last_time_step` (dernier créneau de 30 s accepté, pour qu'un code ne serve qu'une fois).
-- `nodes` : dossiers et fichiers (`type` = `folder` | `file`), rattachés à leur parent par `parent_id` (`NULL` = racine). Deux éléments d'un même dossier ne peuvent pas porter le même nom (comparaison insensible à la casse, sensible aux accents). `owner_id` est l'auteur de l'élément (l'utilisateur qui l'a créé), remis à `NULL` si son compte est supprimé ; il ne restreint pas l'accès : l'arborescence est un espace commun, où tout utilisateur connecté voit et modifie tous les dossiers et fichiers.
+- `nodes` : dossiers et fichiers (`type` = `folder` | `file`), rattachés à leur parent par `parent_id` (`NULL` = racine). Deux éléments d'un même dossier ne peuvent pas porter le même nom (comparaison insensible à la casse, sensible aux accents) ; à la racine, l'unicité vaut par propriétaire (colonne générée `root_owner_key`). `owner_id` est le propriétaire : l'utilisateur qui crée un élément à la racine, puis le propriétaire du dossier parent pour tout élément créé dedans, y compris par un invité. Il est remis à `NULL` si le compte est supprimé, et l'élément n'est alors plus accessible qu'aux administrateurs.
+- `folder_shares` : partages d'un dossier avec un utilisateur (`folder_id`, `user_id`, `permission` = `read` | `write` | `delete`), supprimés avec le dossier ou le compte.
 - `file_contents` : texte du document (`content`), `revision` (nombre d'opérations appliquées, voir la collaboration) et `version` (incrémentée à chaque sauvegarde).
 
 ## API
@@ -121,23 +122,43 @@ Un `user` vu par un admin contient en plus `isBlocked` et `createdAt`.
 
 ### Documents
 
-Toutes les routes de documents exigent une session (401 sinon).
+Toutes les routes de documents exigent une session (401 sinon). Un élément auquel l'utilisateur n'a pas accès se comporte comme un élément inexistant (404, ou 400 pour un dossier parent) ; un droit insuffisant sur un élément visible renvoie 403.
 
 | Méthode | Route | Corps | Réponse |
 |---|---|---|---|
-| GET | `/api/folders/root/children` | | Contenu de la racine |
+| GET | `/api/folders/root/children` | | Contenu de la racine de l'utilisateur connecté |
 | GET | `/api/folders/:folderId/children` | | Contenu d'un dossier |
-| POST | `/api/nodes` | `{ parentId, type, name, content? }` | 201 + élément créé, avec l'utilisateur connecté pour auteur |
-| GET | `/api/nodes/:nodeId` | | Métadonnées de l'élément : `{ id, parentId, type, name, ownerId, createdAt, updatedAt }` |
+| POST | `/api/nodes` | `{ parentId, type, name, content? }` | 201 + élément créé ; `write` requis sur le dossier parent |
+| GET | `/api/nodes/:nodeId` | | Métadonnées de l'élément : `{ id, parentId, type, name, ownerId, permission, createdAt, updatedAt }` |
 | PATCH | `/api/nodes/:nodeId` | `{ name?, parentId? }` | Élément renommé et/ou déplacé |
 | DELETE | `/api/nodes/:nodeId` | | 204, descendants compris |
 | GET | `/api/files/:fileId/content` | | `{ content, version, updatedAt }` |
+
+### Droits et partage
+
+Chaque utilisateur ne voit que sa racine et les dossiers partagés avec lui. Les administrateurs ont tous les droits sur tous les éléments, orphelins compris, et leur racine liste les éléments racine de tous les utilisateurs. Le propriétaire a tous les droits sur ses éléments ; il peut partager un dossier (pas un fichier) avec un autre compte, désigné par son email, qui y accède immédiatement. La permission s'applique à tout le contenu du dossier, sous-dossiers compris ; si plusieurs partages se superposent, la plus élevée l'emporte.
+
+| `permission` | Autorise |
+|---|---|
+| `read` | Lister, lire les métadonnées et le contenu, rejoindre un document en lecture seule |
+| `write` | + créer des éléments, renommer, éditer le contenu en temps réel |
+| `delete` | + supprimer et déplacer |
+
+Le dossier partagé lui-même ne peut être renommé, déplacé ou supprimé que par son propriétaire. Un élément ne peut pas être déplacé vers l'espace d'un autre propriétaire (400). `permission` vaut `owner` dans les réponses pour le propriétaire et pour un administrateur.
+
+| Méthode | Route | Corps | Réponse |
+|---|---|---|---|
+| GET | `/api/folders/shared` | | `{ folders }` : dossiers partagés avec l'utilisateur connecté, `{ id, name, type, childrenCount, updatedAt, permission, owner: { id, email, firstName, lastName } }` |
+| GET | `/api/folders/:folderId/shares` | | `{ shares }` : `{ userId, email, firstName, lastName, permission, createdAt, updatedAt }` ; propriétaire ou administrateur (403 sinon) |
+| POST | `/api/folders/:folderId/shares` | `{ email, permission }` | 201 + partage ; 404 aucun compte pour cet email, 400 partage avec le propriétaire du dossier ou sur un fichier, 409 déjà partagé |
+| PATCH | `/api/folders/:folderId/shares/:userId` | `{ permission }` | Partage modifié ; propriétaire ou administrateur |
+| DELETE | `/api/folders/:folderId/shares/:userId` | | 204 ; par le propriétaire, un administrateur, ou l'invité lui-même pour quitter le partage |
 
 ### Listage d'un dossier
 
 ```json
 {
-  "folder": { "id": 4, "name": "Cours", "parentId": 1 },
+  "folder": { "id": 4, "name": "Cours", "parentId": 1, "permission": "owner" },
   "breadcrumb": [{ "id": 1, "name": "Projets" }, { "id": 4, "name": "Cours" }],
   "children": [
     { "id": 7, "name": "TP", "type": "folder", "childrenCount": 3, "updatedAt": "2026-09-28T10:00:00.000Z" },
@@ -146,7 +167,7 @@ Toutes les routes de documents exigent une session (401 sinon).
 }
 ```
 
-À la racine, `folder` vaut `null` et `breadcrumb` est vide. Les dossiers sont listés avant les fichiers, puis par nom.
+À la racine, `folder` vaut `null` et `breadcrumb` est vide. Les dossiers sont listés avant les fichiers, puis par nom. Pour un invité, `breadcrumb` commence au dossier partagé et `folder.parentId` vaut `null` sur ce dossier, pour ne pas exposer l'arborescence du propriétaire.
 
 ### Déplacement
 
@@ -176,7 +197,7 @@ Une opération décrit tout le document, dans l'ordre, sous forme d'une liste de
 
 | Sens | Événement | Contenu |
 |---|---|---|
-| client → serveur | `document:join` (ack) | `{ fileId, user: { name, color } }` → `{ clientId, content, revision, collaborators }` ou `{ error }` |
+| client → serveur | `document:join` (ack) | `{ fileId, user: { name, color } }` → `{ clientId, permission, content, revision, collaborators }` ou `{ error }` |
 | client → serveur | `document:operation` (ack) | `{ revision, operation }` → `{ revision }` ou `{ error, isResyncRequired }` |
 | client → serveur | `presence:update` | `{ selection: { anchor, head } \| null, pointer: { x, y } \| null }` |
 | client → serveur | `document:leave` | |
@@ -185,7 +206,8 @@ Une opération décrit tout le document, dans l'ordre, sous forme d'une liste de
 | serveur → clients | `presence:leave` | `{ clientId }` |
 
 - `revision` est la révision du document sur laquelle l'opération a été écrite. Le serveur la transforme contre les opérations appliquées depuis, puis renvoie la nouvelle révision dans l'accusé.
-- Un fichier inexistant, un dossier ou un identifiant invalide est refusé à `document:join`.
+- Un fichier inexistant ou inaccessible, un dossier ou un identifiant invalide est refusé à `document:join`.
+- `document:operation` est refusée si `permission` vaut `read`. Les droits sont évalués à `document:join` : une modification ou un retrait de partage prend effet au prochain `document:join`.
 - `isResyncRequired: true` signale une révision antérieure au chargement du document en mémoire (après une reconnexion par exemple) : il faut rejoindre à nouveau le document.
 - La présence n'est pas stockée. Le serveur transforme toutefois les sélections qu'il connaît à chaque opération, pour qu'un nouvel arrivant les reçoive à jour dans `collaborators`.
 

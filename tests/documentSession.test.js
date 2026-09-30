@@ -1,15 +1,24 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { DocumentSession, ResyncRequiredError } from '../src/collaboration/documentSession.js';
 import { InvalidOperationError } from '../src/collaboration/textOperation.js';
 import { createNode } from '../src/services/nodeService.js';
+import { createTestUser, deleteTestUser } from './authHelper.js';
 import { closeDatabase, resetDatabase } from './databaseHelper.js';
 
 const INITIAL_CONTENT = 'abc';
+const SESSION_OWNER_EMAIL = 'document-session@coedit.test';
 
 let session;
+let sessionOwner;
 
 async function createSession({ maxHistoryLength = 1000, maxHistorySize = 1000000, maxDocumentLength = 1000000 }) {
-  const createdFile = await createNode({ parentId: null, type: 'file', name: 'session.txt', content: INITIAL_CONTENT });
+  const createdFile = await createNode({
+    parentId: null,
+    type: 'file',
+    name: 'session.txt',
+    content: INITIAL_CONTENT,
+    user: sessionOwner,
+  });
   return new DocumentSession({
     fileId: createdFile.id,
     content: INITIAL_CONTENT,
@@ -29,6 +38,9 @@ function appendText(documentSession, text) {
   ]);
 }
 
+beforeAll(async () => {
+  sessionOwner = { id: await createTestUser(SESSION_OWNER_EMAIL), role: 'user' };
+});
 beforeEach(resetDatabase);
 
 afterEach(async () => {
@@ -36,7 +48,10 @@ afterEach(async () => {
   session = null;
 });
 
-afterAll(closeDatabase);
+afterAll(async () => {
+  await deleteTestUser(SESSION_OWNER_EMAIL);
+  await closeDatabase();
+});
 
 describe("historique des opérations", () => {
   it('oublie les opérations au-delà de maxHistoryLength et demande une resynchronisation', async () => {

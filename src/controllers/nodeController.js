@@ -9,12 +9,12 @@ import {
 } from '../validators/nodeValidator.js';
 
 export async function listRootChildren(request, response) {
-  response.json(await nodeService.listFolderChildren(null));
+  response.json(await nodeService.listFolderChildren(null, request.user));
 }
 
 export async function listFolderChildren(request, response) {
   const folderId = parseNodeId(request.params.folderId);
-  response.json(await nodeService.listFolderChildren(folderId));
+  response.json(await nodeService.listFolderChildren(folderId, request.user));
 }
 
 export async function createNode(request, response) {
@@ -25,14 +25,14 @@ export async function createNode(request, response) {
     type,
     name: validateNodeName(requestBody.name),
     content: type === 'file' ? validateContent(requestBody.content ?? '') : null,
-    ownerId: request.user.id,
+    user: request.user,
   });
   response.status(201).json(createdNode);
 }
 
 export async function getNode(request, response) {
   const nodeId = parseNodeId(request.params.nodeId);
-  response.json(await nodeService.getNode(nodeId));
+  response.json(await nodeService.getNode(nodeId, request.user));
 }
 
 export async function updateNode(request, response) {
@@ -45,7 +45,7 @@ export async function updateNode(request, response) {
     throw new HttpError(400, 'Indiquer un nouveau nom (name) ou un nouveau dossier parent (parentId)');
   }
 
-  const updatedNode = await nodeService.updateNode(nodeId, {
+  const updatedNode = await nodeService.updateNode(nodeId, request.user, {
     name: isRenameRequested ? validateNodeName(requestBody.name) : undefined,
     parentId: isMoveRequested ? parseParentId(requestBody.parentId) : undefined,
     isMoveRequested,
@@ -55,11 +55,11 @@ export async function updateNode(request, response) {
 
 export async function deleteNode(request, response) {
   const nodeId = parseNodeId(request.params.nodeId);
-  await nodeService.deleteNode(nodeId);
+  await nodeService.deleteNode(nodeId, request.user);
   response.status(204).end();
 }
 
 export async function getFileContent(request, response) {
   const fileId = parseNodeId(request.params.fileId);
-  response.json(await nodeService.getFileContent(fileId));
+  response.json(await nodeService.getFileContent(fileId, request.user));
 }

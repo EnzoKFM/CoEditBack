@@ -11,6 +11,8 @@ const STORE_MAX_DEBOUNCE_MS = 200;
 const WAIT_FOR_TIMEOUT_MS = 3000;
 const WAIT_FOR_INTERVAL_MS = 20;
 const COLLABORATION_TEST_EMAIL = 'collaboration@coedit.test';
+const GUEST_TEST_EMAIL = 'collaboration-invite@coedit.test';
+const ADMIN_TEST_EMAIL = 'collaboration-admin@coedit.test';
 
 let httpServer;
 let io;
@@ -18,6 +20,8 @@ let serverPort;
 let connectedSockets = [];
 let authenticatedAgent;
 let sessionCookie;
+let guestSessionCookie;
+let adminSessionCookie;
 
 beforeAll(async () => {
   httpServer = app.listen(0);
@@ -29,11 +33,17 @@ beforeAll(async () => {
   }).attachToHttpServer(httpServer);
   authenticatedAgent = await createAuthenticatedAgent(COLLABORATION_TEST_EMAIL);
   sessionCookie = await loginAndGetSessionCookie(COLLABORATION_TEST_EMAIL);
+  await createAuthenticatedAgent(GUEST_TEST_EMAIL);
+  guestSessionCookie = await loginAndGetSessionCookie(GUEST_TEST_EMAIL);
+  await createAuthenticatedAgent(ADMIN_TEST_EMAIL, 'admin');
+  adminSessionCookie = await loginAndGetSessionCookie(ADMIN_TEST_EMAIL);
 });
 
 afterAll(async () => {
   await new Promise((resolve) => io.close(resolve));
   await deleteTestUser(COLLABORATION_TEST_EMAIL);
+  await deleteTestUser(GUEST_TEST_EMAIL);
+  await deleteTestUser(ADMIN_TEST_EMAIL);
   await closeDatabase();
 });
 
@@ -657,6 +667,103 @@ describe('limitation du débit des sockets', () => {
     } finally {
       await new Promise((resolve) => socketServer.close(resolve));
     }
+  });
+});
+
+describe('droits d\'accès Socket.IO', () => {
+  async function createSharedFile(permission) {
+    const sharedFolder = (await createFolder('Partagé')).body;
+    const sharedFile = (await createFile('partage.txt', sharedFolder.id, 'abc')).body;
+    if (permission) {
+      await authenticatedAgent.post(`/api/folders/${sharedFolder.id}/shares`).send({
+        email: GUEST_TEST_EMAIL,
+        permission,
+      });
+    }
+    return sharedFile;
+  }
+
+  it('refuse le join sur un fichier sans accès', async () => {
+    const privateFile = await createSharedFile(null);
+    const guestSocket = await connectClient(guestSessionCookie);
+
+    const joinAcknowledgement = await joinDocument(guestSocket, privateFile.id, { name: 'Invité' });
+
+    expect(joinAcknowledgement.error).toBeDefined();
+    expect(joinAcknowledgement.content).toBeUndefined();
+  });
+
+  it("renvoie la permission owner au propriétaire dans l'ack du join", async () => {
+    const sharedFile = await createSharedFile('read');
+    const ownerSocket = await connectClient();
+
+    const joinAcknowledgement = await joinDocument(ownerSocket, sharedFile.id, { name: 'Propriétaire' });
+
+    expect(joinAcknowledgement.permission).toBe('owner');
+  });
+
+  it.each(['read', 'write', 'delete'])("renvoie la permission %s à l'invité dans l'ack du join", async (permission) => {
+    const sharedFile = await createSharedFile(permission);
+    const guestSocket = await connectClient(guestSessionCookie);
+
+    const joinAcknowledgement = await joinDocument(guestSocket, sharedFile.id, { name: 'Invité' });
+
+    expect(joinAcknowledgement.error).toBeUndefined();
+    expect(joinAcknowledgement.permission).toBe(permission);
+    expect(joinAcknowledgement.content).toBe('abc');
+  });
+
+  it("refuse l'écriture d'un invité read et laisse le contenu intact", async () => {
+    const sharedFile = await createSharedFile('read');
+    const guestSocket = await connectClient(guestSessionCookie);
+    const joinAcknowledgement = await joinDocument(guestSocket, sharedFile.id, { name: 'Invité' });
+
+    const operationAcknowledgement = await guestSocket.emitWithAck('document:operation', {
+      revision: joinAcknowledgement.revision,
+      operation: [{ retain: 3 }, { insert: 'd' }],
+    });
+    const ownerSocket = await connectClient();
+    const ownerJoinAcknowledgement = await joinDocument(ownerSocket, sharedFile.id, { name: 'Propriétaire' });
+
+    expect(operationAcknowledgement.error).toBeDefined();
+    expect(ownerJoinAcknowledgement.content).toBe('abc');
+    expect(ownerJoinAcknowledgement.revision).toBe(0);
+  });
+
+  it("accepte l'écriture d'un invité write et sauvegarde le contenu", async () => {
+    const sharedFile = await createSharedFile('write');
+    const guestSocket = await connectClient(guestSessionCookie);
+    const joinAcknowledgement = await joinDocument(guestSocket, sharedFile.id, { name: 'Invité' });
+
+    const operationAcknowledgement = await guestSocket.emitWithAck('document:operation', {
+      revision: joinAcknowledgement.revision,
+      operation: [{ retain: 3 }, { insert: 'd' }],
+    });
+
+    expect(operationAcknowledgement.error).toBeUndefined();
+    await vi.waitFor(
+      async () => {
+        const contentResponse = await authenticatedAgent.get(`/api/files/${sharedFile.id}/content`);
+        expect(contentResponse.body.content).toBe('abcd');
+      },
+      { timeout: WAIT_FOR_TIMEOUT_MS, interval: WAIT_FOR_INTERVAL_MS },
+    );
+  });
+
+  it("permet à un administrateur de rejoindre et modifier le fichier d'un autre utilisateur", async () => {
+    const privateFile = await createSharedFile(null);
+    const adminSocket = await connectClient(adminSessionCookie);
+
+    const joinAcknowledgement = await joinDocument(adminSocket, privateFile.id, { name: 'Administrateur' });
+    const operationAcknowledgement = await adminSocket.emitWithAck('document:operation', {
+      revision: joinAcknowledgement.revision,
+      operation: [{ retain: 3 }, { insert: 'd' }],
+    });
+
+    expect(joinAcknowledgement.error).toBeUndefined();
+    expect(joinAcknowledgement.permission).toBe('owner');
+    expect(joinAcknowledgement.content).toBe('abc');
+    expect(operationAcknowledgement.error).toBeUndefined();
   });
 });
 

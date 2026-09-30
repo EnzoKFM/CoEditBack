@@ -30,7 +30,8 @@ src/server.js                          écoute HTTP et branchement de Socket.IO
 src/routes/*.js                        /api/folders, /api/nodes, /api/files
 src/controllers/nodeController.js      lecture de la requête, validation, appel du service
 src/validators/nodeValidator.js        parse ou lève une HttpError 400
-src/services/nodeService.js            tout le SQL, avec les transactions (withTransaction)
+src/services/nodeService.js            tout le SQL des nœuds, avec les transactions (withTransaction) et le calcul des droits (findNodeAccess)
+src/services/shareService.js           partages de dossiers (folder_shares)
 src/collaboration/textOperation.js     OT pure : parse, application, transformation d'opérations
 src/collaboration/documentSession.js   document en mémoire : révision, historique, présence, sauvegarde
 src/collaboration/collaborationServer.js  événements Socket.IO, chargement et déchargement des sessions
@@ -39,8 +40,9 @@ tests/*.test.js                        tests d'intégration sur une vraie base M
 ```
 
 Modèle de données :
-- `nodes` : dossiers et fichiers, organisés en liste d'adjacence (`parent_id` vaut NULL à la racine). Le nom est unique par dossier via `UNIQUE(parent_key, name)`, où `parent_key` = `COALESCE(parent_id, 0)` couvre aussi la racine.
+- `nodes` : dossiers et fichiers, organisés en liste d'adjacence (`parent_id` vaut NULL à la racine). Le nom est unique par dossier via `UNIQUE(parent_key, root_owner_key, name)`, où `parent_key` = `COALESCE(parent_id, 0)` couvre aussi la racine et `root_owner_key` = `owner_id` à la racine (0 ailleurs) y rend l'unicité propre à chaque propriétaire.
 - `file_contents` : `content`, `revision` (nombre d'opérations OT appliquées), `version` (nombre de sauvegardes).
+- `folder_shares` : partage d'un dossier avec un utilisateur, permission `read` < `write` < `delete`, héritée par tous les descendants. Tout nœud porte l'`owner_id` de la racine de son arbre ; tout accès passe par `findNodeAccess` (un administrateur y a le rang propriétaire sur tout nœud), et un nœud inaccessible répond 404.
 
 ## Règles à respecter
 
