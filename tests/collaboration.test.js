@@ -3,7 +3,7 @@ import { io as createSocketClient } from 'socket.io-client';
 import { app } from '../src/app.js';
 import { createCollaboration } from '../src/collaboration/collaborationServer.js';
 import { applyOperation, parseOperation, transformOperation } from '../src/collaboration/textOperation.js';
-import { createAuthenticatedAgent, deleteTestUser, loginAndGetSessionCookie } from './authHelper.js';
+import { createAuthenticatedAgent, createTestUser, deleteTestUser, loginAndGetSessionCookie } from './authHelper.js';
 import { closeDatabase, resetDatabase } from './databaseHelper.js';
 
 const STORE_DEBOUNCE_MS = 50;
@@ -385,6 +385,33 @@ describe('sauvegarde', () => {
     const listingResponse = await authenticatedAgent.get('/api/folders/root/children');
     const savedFileChild = listingResponse.body.children.find((childNode) => childNode.id === createdFile.id);
     expect(savedFileChild.size).toBe(expectedContent.length);
+  });
+
+  it("enregistre l'auteur de la dernière édition en direct comme dernier modificateur", async () => {
+    const editorEmail = 'editeur-collaboration@coedit.test';
+    const editorId = await createTestUser(editorEmail, 'admin');
+    try {
+      const createdFile = (await createFile('auteur-edition.txt', null, 'abc')).body;
+      const editorSocket = await connectClient(await loginAndGetSessionCookie(editorEmail));
+      const joinAcknowledgement = await joinDocument(editorSocket, createdFile.id, { name: 'Éditeur' });
+
+      await editorSocket.emitWithAck('document:operation', {
+        revision: joinAcknowledgement.revision,
+        operation: parseOperation([{ retain: 3 }, { insert: 'd' }]),
+      });
+
+      await vi.waitFor(
+        async () => {
+          const nodeResponse = await authenticatedAgent.get(`/api/nodes/${createdFile.id}`);
+          expect(nodeResponse.body.updatedBy).toEqual({ id: editorId, name: 'Test Utilisateur' });
+        },
+        { timeout: WAIT_FOR_TIMEOUT_MS, interval: WAIT_FOR_INTERVAL_MS },
+      );
+      const nodeResponse = await authenticatedAgent.get(`/api/nodes/${createdFile.id}`);
+      expect(nodeResponse.body.createdBy.id).not.toBe(editorId);
+    } finally {
+      await deleteTestUser(editorEmail);
+    }
   });
 
   it('sauvegarde au départ du dernier client puis recharge la session sans doublon et avec la révision conservée', async () => {

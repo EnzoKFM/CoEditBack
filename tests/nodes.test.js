@@ -135,6 +135,33 @@ describe('POST /api/nodes', () => {
     expect(nodeResponse.body.ownerId).toBe(currentUser.id);
   });
 
+  it('renseigne le créateur, le dernier modificateur et les dates', async () => {
+    const currentUser = (await authenticatedAgent.get('/api/auth/me')).body.user;
+    const expectedAuthor = { id: currentUser.id, name: `${currentUser.firstName} ${currentUser.lastName}` };
+
+    const creationResponse = await createFile('Metadonnees.txt');
+    const nodeResponse = await authenticatedAgent.get(`/api/nodes/${creationResponse.body.id}`);
+    const listingResponse = await authenticatedAgent.get('/api/folders/root/children');
+    const listedFile = listingResponse.body.children.find((child) => child.id === creationResponse.body.id);
+
+    for (const nodeMetadata of [creationResponse.body, nodeResponse.body, listedFile]) {
+      expect(nodeMetadata.createdBy).toEqual(expectedAuthor);
+      expect(nodeMetadata.updatedBy).toEqual(expectedAuthor);
+      expect(Number.isNaN(Date.parse(nodeMetadata.createdAt))).toBe(false);
+      expect(Number.isNaN(Date.parse(nodeMetadata.updatedAt))).toBe(false);
+    }
+  });
+
+  it("n'expose plus de créateur quand son compte est supprimé", async () => {
+    const formerAuthorAgent = await createAuthenticatedAgent(FORMER_AUTHOR_EMAIL);
+    const createdFolder = (await formerAuthorAgent.post('/api/nodes').send({ type: 'folder', name: 'SansAuteur' })).body;
+
+    await deleteTestUser(FORMER_AUTHOR_EMAIL);
+    const [authorRows] = await pool.query('SELECT created_by, updated_by FROM nodes WHERE id = ?', [createdFolder.id]);
+
+    expect(authorRows[0]).toEqual({ created_by: null, updated_by: null });
+  });
+
   it("conserve l'élément sans auteur quand le compte de l'auteur est supprimé", async () => {
     const formerAuthorAgent = await createAuthenticatedAgent(FORMER_AUTHOR_EMAIL);
     const createdFolder = (await formerAuthorAgent.post('/api/nodes').send({ type: 'folder', name: 'Orphelin' })).body;

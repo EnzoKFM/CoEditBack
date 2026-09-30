@@ -188,6 +188,22 @@ describe('permission write', () => {
     expect(deletionResponse.status).toBe(403);
   });
 
+  it("retient le créateur et l'invité qui a modifié en dernier", async () => {
+    const sharedFolder = await createSharedFolder('write');
+    const ownerFile = (await createFile(ownerAgent, 'rapport.txt', sharedFolder.id)).body;
+
+    const renameResponse = await guestAgent.patch(`/api/nodes/${ownerFile.id}`).send({ name: 'rapport-v2.txt' });
+    const listingResponse = await ownerAgent.get(`/api/folders/${sharedFolder.id}/children`);
+    const listedFile = listingResponse.body.children.find((child) => child.id === ownerFile.id);
+
+    const ownerAuthor = { id: ownerUser.id, name: `${ownerUser.firstName} ${ownerUser.lastName}` };
+    const guestAuthor = { id: guestUser.id, name: `${guestUser.firstName} ${guestUser.lastName}` };
+    expect(renameResponse.body.createdBy).toEqual(ownerAuthor);
+    expect(renameResponse.body.updatedBy).toEqual(guestAuthor);
+    expect(listedFile.createdBy).toEqual(ownerAuthor);
+    expect(listedFile.updatedBy).toEqual(guestAuthor);
+  });
+
   it("donne au propriétaire l'élément créé par l'invité", async () => {
     const sharedFolder = await createSharedFolder('write');
 

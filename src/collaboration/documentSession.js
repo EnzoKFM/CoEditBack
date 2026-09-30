@@ -41,6 +41,7 @@ export class DocumentSession {
     this.storeTimer = null;
     this.firstUnstoredChangeAt = null;
     this.storeQueue = Promise.resolve();
+    this.lastEditorUserId = null;
   }
 
   addCollaborator(clientId, user) {
@@ -109,7 +110,7 @@ export class DocumentSession {
     return { anchor: selection.anchor, head: selection.head };
   }
 
-  receiveOperation(baseRevision, rawOperation) {
+  receiveOperation(baseRevision, rawOperation, editorUserId = null) {
     if (!Number.isInteger(baseRevision) || baseRevision > this.revision) {
       throw new InvalidOperationError('Révision de base invalide');
     }
@@ -130,6 +131,7 @@ export class DocumentSession {
     this.content = updatedContent;
     this.recordInHistory(operation);
     this.revision += 1;
+    this.lastEditorUserId = editorUserId ?? this.lastEditorUserId;
     this.transformSelections(operation);
     this.scheduleStore();
     return { revision: this.revision, operation };
@@ -171,13 +173,16 @@ export class DocumentSession {
 
     const contentToStore = this.content;
     const revisionToStore = this.revision;
+    const editorToStore = this.lastEditorUserId;
     if (revisionToStore === this.queuedStoreRevision) {
       return this.storeQueue;
     }
 
     this.queuedStoreRevision = revisionToStore;
     this.storeQueue = this.storeQueue
-      .then(() => storeFileDocument(this.fileId, { content: contentToStore, revision: revisionToStore }))
+      .then(() =>
+        storeFileDocument(this.fileId, { content: contentToStore, revision: revisionToStore, updatedBy: editorToStore }),
+      )
       .catch((error) => console.error(`Sauvegarde du fichier ${this.fileId} impossible :`, error.message));
     return this.storeQueue;
   }

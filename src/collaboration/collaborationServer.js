@@ -216,6 +216,7 @@ export function createCollaboration({
           const { revision, operation } = session.receiveOperation(
             operationRequest?.revision,
             operationRequest?.operation,
+            socket.data.user.id,
           );
           socket.to(toRoomName(session.fileId)).emit('document:operation', {
             clientId: socket.id,
