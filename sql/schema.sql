@@ -23,13 +23,14 @@ CREATE TABLE IF NOT EXISTS nodes (
   id INT UNSIGNED NOT NULL AUTO_INCREMENT,
   parent_id INT UNSIGNED NULL,
   parent_key INT UNSIGNED AS (COALESCE(parent_id, 0)) VIRTUAL,
+  root_owner_key INT UNSIGNED AS (IF(parent_id IS NULL, owner_id, 0)) VIRTUAL,
   type ENUM('folder', 'file') NOT NULL,
   name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_ci NOT NULL,
   owner_id INT UNSIGNED NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY uq_nodes_parent_name (parent_key, name),
+  UNIQUE KEY uq_nodes_parent_name (parent_key, root_owner_key, name),
   KEY idx_nodes_parent (parent_id),
   CONSTRAINT fk_nodes_parent FOREIGN KEY (parent_id) REFERENCES nodes (id) ON DELETE CASCADE,
   CONSTRAINT fk_nodes_owner FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE SET NULL
@@ -43,4 +44,16 @@ CREATE TABLE IF NOT EXISTS file_contents (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (node_id),
   CONSTRAINT fk_file_contents_node FOREIGN KEY (node_id) REFERENCES nodes (id) ON DELETE CASCADE
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+CREATE TABLE IF NOT EXISTS folder_shares (
+  folder_id INT UNSIGNED NOT NULL,
+  user_id INT UNSIGNED NOT NULL,
+  permission ENUM('read', 'write', 'delete') NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (folder_id, user_id),
+  KEY idx_folder_shares_user (user_id),
+  CONSTRAINT fk_folder_shares_folder FOREIGN KEY (folder_id) REFERENCES nodes (id) ON DELETE CASCADE,
+  CONSTRAINT fk_folder_shares_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { app } from '../src/app.js';
+import { pool } from '../src/db.js';
 import { createAuthenticatedAgent, deleteTestUser } from './authHelper.js';
 import { closeDatabase, resetDatabase } from './databaseHelper.js';
 
@@ -139,10 +140,12 @@ describe('POST /api/nodes', () => {
     const createdFolder = (await formerAuthorAgent.post('/api/nodes').send({ type: 'folder', name: 'Orphelin' })).body;
 
     await deleteTestUser(FORMER_AUTHOR_EMAIL);
+    const [orphanRows] = await pool.query('SELECT owner_id FROM nodes WHERE id = ?', [createdFolder.id]);
     const nodeResponse = await authenticatedAgent.get(`/api/nodes/${createdFolder.id}`);
 
-    expect(nodeResponse.status).toBe(200);
-    expect(nodeResponse.body.ownerId).toBeNull();
+    expect(orphanRows).toHaveLength(1);
+    expect(orphanRows[0].owner_id).toBeNull();
+    expect(nodeResponse.status).toBe(404);
   });
 
   it('crée un fichier et renvoie 201', async () => {
