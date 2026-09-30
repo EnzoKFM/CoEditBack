@@ -17,6 +17,7 @@ function toNodeResponse(nodeRow) {
     type: nodeRow.type,
     name: nodeRow.name,
     ownerId: nodeRow.owner_id,
+    mimeType: nodeRow.mime_type,
     createdAt: nodeRow.created_at,
     updatedAt: nodeRow.updated_at,
   };
@@ -34,6 +35,7 @@ function toChildResponse(childRow) {
     childResponse.childrenCount = Number(childRow.children_count);
   } else {
     childResponse.size = Number(childRow.size);
+    childResponse.mimeType = childRow.mime_type;
   }
   return childResponse;
 }
@@ -55,7 +57,11 @@ async function withTransaction(transactionCallback) {
 
 async function findNodeById(nodeId, connection = pool) {
   const [nodeRows] = await connection.query(
-    'SELECT id, parent_id, type, name, owner_id, created_at, updated_at FROM nodes WHERE id = ?',
+    `SELECT node.id, node.parent_id, node.type, node.name, node.owner_id, node.created_at, node.updated_at,
+            file_binary.mime_type
+     FROM nodes AS node
+     LEFT JOIN file_binaries AS file_binary ON file_binary.node_id = node.id
+     WHERE node.id = ?`,
     [nodeId],
   );
   return nodeRows[0] ?? null;
@@ -207,10 +213,12 @@ export async function listFolderChildren(folderId, user) {
 
   const [childRows] = await pool.query(
     `SELECT node.id, node.name, node.type, node.updated_at,
-            CHAR_LENGTH(file_content.content) AS size,
+            COALESCE(CHAR_LENGTH(file_content.content), file_binary.size) AS size,
+            file_binary.mime_type,
             (SELECT COUNT(*) FROM nodes AS grandchild WHERE grandchild.parent_id = node.id) AS children_count
      FROM nodes AS node
      LEFT JOIN file_contents AS file_content ON file_content.node_id = node.id
+     LEFT JOIN file_binaries AS file_binary ON file_binary.node_id = node.id
      WHERE node.parent_key = ? AND (? OR node.root_owner_key = ?)
      ORDER BY node.type = 'file', node.name`,
     [
@@ -228,7 +236,7 @@ export async function getNode(nodeId, user) {
   return { ...toNodeResponse(nodeRow), permission: toPermissionName(permissionRank) };
 }
 
-export async function createNode({ parentId, type, name, content, user }) {
+export async function createNode({ parentId, type, name, content, binaryFile, user }) {
   return withTransaction(async (connection) => {
     let ownerId = user.id;
     if (parentId !== null) {
@@ -241,7 +249,14 @@ export async function createNode({ parentId, type, name, content, user }) {
       [parentId, type, name, ownerId],
     );
 
-    if (type === 'file') {
+    if (binaryFile) {
+      await connection.query('INSERT INTO file_binaries (node_id, mime_type, data, size) VALUES (?, ?, ?, ?)', [
+        insertResult.insertId,
+        binaryFile.mimeType,
+        binaryFile.data,
+        binaryFile.data.length,
+      ]);
+    } else if (type === 'file') {
       await connection.query('INSERT INTO file_contents (node_id, content) VALUES (?, ?)', [
         insertResult.insertId,
         content,
@@ -312,7 +327,60 @@ export async function getFileContent(fileId, user) {
   if (fileRow.type !== 'file') {
     throw new HttpError(400, "Cet élément n'est pas un fichier");
   }
+  if (fileRow.content === null) {
+    throw new HttpError(400, "Ce fichier n'est pas un document texte");
+  }
   return { content: fileRow.content, version: fileRow.version, updatedAt: fileRow.updated_at };
+}
+
+export async function getBinaryFile(fileId, user) {
+  const { nodeRow } = await getAccessibleNode(fileId, user);
+  if (nodeRow.type !== 'file') {
+    throw new HttpError(400, "Cet élément n'est pas un fichier");
+  }
+
+  const [binaryFileRows] = await pool.query(
+    'SELECT mime_type, data, version, updated_at FROM file_binaries WHERE node_id = ?',
+    [fileId],
+  );
+  const binaryFileRow = binaryFileRows[0];
+  if (!binaryFileRow) {
+    throw new HttpError(400, 'Ce fichier est un document texte : son contenu se lit via /content');
+  }
+  return {
+    name: nodeRow.name,
+    mimeType: binaryFileRow.mime_type,
+    data: binaryFileRow.data,
+    version: binaryFileRow.version,
+    updatedAt: binaryFileRow.updated_at,
+  };
+}
+
+export async function replaceBinaryFile(fileId, user, { mimeType, data }) {
+  return withTransaction(async (connection) => {
+    const { nodeRow, permissionRank } = await getAccessibleNode(fileId, user, connection);
+    if (nodeRow.type !== 'file') {
+      throw new HttpError(400, "Cet élément n'est pas un fichier");
+    }
+    assertPermission(permissionRank, PERMISSION_RANKS.write);
+
+    const [updateResult] = await connection.query(
+      `UPDATE file_binaries AS file_binary
+       JOIN nodes AS node ON node.id = file_binary.node_id
+       SET file_binary.mime_type = ?,
+           file_binary.data = ?,
+           file_binary.size = ?,
+           file_binary.version = file_binary.version + 1,
+           file_binary.updated_at = CURRENT_TIMESTAMP,
+           node.updated_at = CURRENT_TIMESTAMP
+       WHERE file_binary.node_id = ?`,
+      [mimeType, data, data.length, fileId],
+    );
+    if (updateResult.affectedRows === 0) {
+      throw new HttpError(400, 'Ce fichier est un document texte : son contenu se modifie en temps réel');
+    }
+    return toNodeResponse(await findNodeById(fileId, connection));
+  });
 }
 
 export async function findFileDocument(fileId) {

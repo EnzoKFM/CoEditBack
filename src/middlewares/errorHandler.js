@@ -17,6 +17,14 @@ export function errorHandler(error, request, response, next) {
     return response.status(413).json({ error: 'Contenu trop volumineux' });
   }
 
+  if (error.code === 'LIMIT_FILE_SIZE') {
+    return response.status(413).json({ error: 'Fichier trop volumineux (20 Mo maximum)' });
+  }
+
+  if (error.name === 'MulterError') {
+    return response.status(400).json({ error: 'Envoi de fichier invalide' });
+  }
+
   console.error(error);
   return response.status(500).json({ error: 'Erreur interne du serveur' });
 }
