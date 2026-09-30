@@ -1,3 +1,4 @@
+import { fileTypeFromBuffer, supportedMimeTypes } from 'file-type';
 import { HttpError } from '../errors/HttpError.js';
 
 const NODE_TYPES = ['folder', 'file'];
@@ -53,16 +54,39 @@ export function validateContent(rawContent) {
   return rawContent;
 }
 
-export function validateUploadedFile(uploadedFile) {
+function validateUploadedFile(uploadedFile) {
   if (!uploadedFile) {
     throw new HttpError(400, 'Le fichier est obligatoire (champ « file »)');
   }
   return uploadedFile;
 }
 
-export function parseMimeType(rawMimeType) {
+function parseMimeType(rawMimeType) {
   const normalizedMimeType = typeof rawMimeType === 'string' ? rawMimeType.trim().toLowerCase() : '';
   const isValidMimeType =
     normalizedMimeType.length <= MIME_TYPE_MAX_LENGTH && MIME_TYPE_PATTERN.test(normalizedMimeType);
   return isValidMimeType ? normalizedMimeType : DEFAULT_MIME_TYPE;
+}
+
+export async function parseUploadedBinaryFile(rawUploadedFile) {
+  const uploadedFile = validateUploadedFile(rawUploadedFile);
+  const declaredMimeType = parseMimeType(uploadedFile.mimetype);
+  const detectedFileType = await fileTypeFromBuffer(uploadedFile.buffer);
+  const isDeclaredMimeTypeGeneric = declaredMimeType === DEFAULT_MIME_TYPE;
+
+  if (detectedFileType && !isDeclaredMimeTypeGeneric && detectedFileType.mime !== declaredMimeType) {
+    throw new HttpError(
+      400,
+      `Le contenu du fichier (${detectedFileType.mime}) ne correspond pas au type déclaré (${declaredMimeType})`,
+    );
+  }
+  if (!detectedFileType && supportedMimeTypes.has(declaredMimeType)) {
+    throw new HttpError(400, `Le contenu du fichier ne correspond pas au type déclaré (${declaredMimeType})`);
+  }
+
+  return {
+    originalName: uploadedFile.originalname,
+    mimeType: detectedFileType?.mime ?? declaredMimeType,
+    data: uploadedFile.buffer,
+  };
 }

@@ -2,6 +2,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { app } from '../src/app.js';
 import { pool } from '../src/db.js';
+import { BINARY_FILE_UPLOAD_LIMIT } from '../src/middlewares/rateLimiters.js';
 import { BINARY_FILE_MAX_BYTES } from '../src/routes/fileRoutes.js';
 import { createAuthenticatedAgent, deleteTestUser } from './authHelper.js';
 import { closeDatabase, resetDatabase } from './databaseHelper.js';
@@ -9,24 +10,37 @@ import { closeDatabase, resetDatabase } from './databaseHelper.js';
 const OWNER_EMAIL = 'binaire-proprietaire@coedit.test';
 const GUEST_EMAIL = 'binaire-invite@coedit.test';
 const STRANGER_EMAIL = 'binaire-etranger@coedit.test';
+const LIMITED_EMAIL = 'binaire-limite@coedit.test';
+const UNLIMITED_EMAIL = 'binaire-non-limite@coedit.test';
+const FORGED_EMAIL = 'binaire-falsifie@coedit.test';
 
-const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0x80]);
+const PNG_BYTES = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+);
+const SHELL_SCRIPT_BYTES = Buffer.from('#!/bin/sh\necho "script malveillant"\n');
+const PLAIN_TEXT_BYTES = Buffer.from('contenu texte brut sans signature reconnue');
 const PDF_BYTES = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x00, 0x01, 0xc3, 0x28]);
 
 let ownerAgent;
 let guestAgent;
 let strangerAgent;
+let forgedAgent;
 
 beforeAll(async () => {
   ownerAgent = await createAuthenticatedAgent(OWNER_EMAIL);
   guestAgent = await createAuthenticatedAgent(GUEST_EMAIL);
   strangerAgent = await createAuthenticatedAgent(STRANGER_EMAIL);
+  forgedAgent = await createAuthenticatedAgent(FORGED_EMAIL);
 });
 beforeEach(resetDatabase);
 afterAll(async () => {
   await deleteTestUser(OWNER_EMAIL);
   await deleteTestUser(GUEST_EMAIL);
   await deleteTestUser(STRANGER_EMAIL);
+  await deleteTestUser(FORGED_EMAIL);
+  await deleteTestUser(LIMITED_EMAIL);
+  await deleteTestUser(UNLIMITED_EMAIL);
   await closeDatabase();
 });
 
@@ -145,7 +159,10 @@ describe('envoi de fichier binaire', () => {
   it("renvoie 409 pour un nom en doublon dans le même dossier", async () => {
     await uploadBinary(ownerAgent, PNG_BYTES, { filename: 'doublon.png' });
 
-    const duplicateResponse = await uploadBinary(ownerAgent, PDF_BYTES, { filename: 'doublon.png' });
+    const duplicateResponse = await uploadBinary(ownerAgent, PDF_BYTES, {
+      filename: 'doublon.png',
+      contentType: 'application/pdf',
+    });
 
     expect(duplicateResponse.status).toBe(409);
   });
@@ -159,14 +176,14 @@ describe('envoi de fichier binaire', () => {
   });
 
   it('retient text/plain, défaut de la RFC 7578, pour un type MIME invalide', async () => {
-    const uploadResponse = await uploadBinary(ownerAgent, PNG_BYTES, { contentType: 'pas-un-type-mime' });
+    const uploadResponse = await uploadBinary(ownerAgent, PLAIN_TEXT_BYTES, { contentType: 'pas-un-type-mime' });
 
     expect(uploadResponse.status).toBe(201);
     expect(uploadResponse.body.mimeType).toBe('text/plain');
   });
 
   it('retient text/plain, défaut de la RFC 7578, pour un type MIME mal formé contenant une barre', async () => {
-    const uploadResponse = await uploadBinary(ownerAgent, PNG_BYTES, { contentType: 'image /png' });
+    const uploadResponse = await uploadBinary(ownerAgent, PLAIN_TEXT_BYTES, { contentType: 'image /png' });
 
     expect(uploadResponse.status).toBe(201);
     expect(uploadResponse.body.mimeType).toBe('text/plain');
@@ -178,7 +195,7 @@ describe('envoi de fichier binaire', () => {
       Buffer.from(
         `--${multipartBoundary}\r\nContent-Disposition: form-data; name="file"; filename="sans-type.bin"\r\n\r\n`,
       ),
-      PNG_BYTES,
+      PLAIN_TEXT_BYTES,
       Buffer.from(`\r\n--${multipartBoundary}--\r\n`),
     ]);
 
@@ -192,9 +209,12 @@ describe('envoi de fichier binaire', () => {
   });
 
   it('accepte un fichier de la taille maximale', async () => {
-    const maximumSizeBytes = Buffer.alloc(BINARY_FILE_MAX_BYTES, 7);
+    const maximumSizeBytes = Buffer.concat([PDF_BYTES, Buffer.alloc(BINARY_FILE_MAX_BYTES - PDF_BYTES.length, 7)]);
 
-    const uploadResponse = await uploadBinary(ownerAgent, maximumSizeBytes, { filename: 'limite.bin' });
+    const uploadResponse = await uploadBinary(ownerAgent, maximumSizeBytes, {
+      filename: 'limite.pdf',
+      contentType: 'application/pdf',
+    });
 
     expect(uploadResponse.status).toBe(201);
     expect((await findBinaryRow(uploadResponse.body.id)).size).toBe(BINARY_FILE_MAX_BYTES);
@@ -284,7 +304,7 @@ describe('téléchargement de fichier binaire', () => {
   });
 
   it('restitue un type MIME par défaut pour un fichier sans type', async () => {
-    const uploadedFile = (await ownerAgent.post('/api/files').attach('file', PNG_BYTES, { filename: 'brut.bin' })).body;
+    const uploadedFile = (await ownerAgent.post('/api/files').attach('file', PLAIN_TEXT_BYTES, { filename: 'brut.bin' })).body;
 
     const downloadResponse = await downloadBinary(ownerAgent, uploadedFile.id);
 
@@ -369,7 +389,7 @@ describe('remplacement de fichier binaire', () => {
     const uploadedFile = (await uploadBinary(ownerAgent, PNG_BYTES)).body;
 
     await replaceBinary(ownerAgent, uploadedFile.id, PDF_BYTES);
-    await replaceBinary(ownerAgent, uploadedFile.id, PNG_BYTES);
+    await replaceBinary(ownerAgent, uploadedFile.id, PNG_BYTES, { filename: 'nouveau.png', contentType: 'image/png' });
 
     expect((await findBinaryRow(uploadedFile.id)).version).toBe(3);
   });
@@ -524,5 +544,122 @@ describe('interactions avec les autres routes', () => {
 
     expect(deleteResponse.status).toBe(204);
     expect(await findBinaryRow(uploadedFile.id)).toBeUndefined();
+  });
+});
+
+async function countRowsCreatedByForgedUser() {
+  const [nodeRows] = await pool.query('SELECT id FROM nodes');
+  const [binaryRows] = await pool.query('SELECT node_id FROM file_binaries');
+  return { nodeCount: nodeRows.length, binaryCount: binaryRows.length };
+}
+
+describe('cohérence entre le contenu et le type déclaré', () => {
+  it('renvoie 400 pour un script shell renommé en .png déclaré image/png, sans créer de ligne', async () => {
+    const uploadResponse = await uploadBinary(forgedAgent, SHELL_SCRIPT_BYTES, {
+      filename: 'innocent.png',
+      contentType: 'image/png',
+    });
+
+    expect(uploadResponse.status).toBe(400);
+    expect(await countRowsCreatedByForgedUser()).toEqual({ nodeCount: 0, binaryCount: 0 });
+  });
+
+  it('renvoie 400 pour un PDF réel déclaré image/png', async () => {
+    const uploadResponse = await uploadBinary(forgedAgent, PDF_BYTES, { filename: 'faux.png', contentType: 'image/png' });
+
+    expect(uploadResponse.status).toBe(400);
+    expect(uploadResponse.body.error).toContain('application/pdf');
+    expect(await countRowsCreatedByForgedUser()).toEqual({ nodeCount: 0, binaryCount: 0 });
+  });
+
+  it('enregistre image/png pour un PNG réel déclaré application/octet-stream', async () => {
+    const uploadResponse = await uploadBinary(forgedAgent, PNG_BYTES, {
+      filename: 'generique.bin',
+      contentType: 'application/octet-stream',
+    });
+
+    expect(uploadResponse.status).toBe(201);
+    expect(uploadResponse.body.mimeType).toBe('image/png');
+    expect((await findBinaryRow(uploadResponse.body.id)).mime_type).toBe('image/png');
+  });
+
+  it('accepte un texte brut déclaré text/plain', async () => {
+    const uploadResponse = await uploadBinary(forgedAgent, PLAIN_TEXT_BYTES, {
+      filename: 'note.txt',
+      contentType: 'text/plain',
+    });
+
+    expect(uploadResponse.status).toBe(201);
+    expect(uploadResponse.body.mimeType).toBe('text/plain');
+  });
+
+  it('renvoie 400 au remplacement par un script déclaré image/png et laisse le contenu intact', async () => {
+    const uploadedFile = (await uploadBinary(forgedAgent, PNG_BYTES, { filename: 'logo.png' })).body;
+
+    const replaceResponse = await replaceBinary(forgedAgent, uploadedFile.id, SHELL_SCRIPT_BYTES, {
+      filename: 'innocent.png',
+      contentType: 'image/png',
+    });
+
+    expect(replaceResponse.status).toBe(400);
+    const binaryRow = await findBinaryRow(uploadedFile.id);
+    expect(binaryRow.version).toBe(1);
+    expect(binaryRow.mime_type).toBe('image/png');
+    const downloadResponse = await downloadBinary(forgedAgent, uploadedFile.id);
+    expect(downloadResponse.body.equals(PNG_BYTES)).toBe(true);
+  });
+});
+
+describe('limites des champs multipart', () => {
+  it('renvoie 400 avec trois champs texte en plus du fichier', async () => {
+    const uploadResponse = await forgedAgent
+      .post('/api/files')
+      .attach('file', PNG_BYTES, { filename: 'logo.png', contentType: 'image/png' })
+      .field('name', 'logo.png')
+      .field('premierChampInconnu', 'valeur')
+      .field('secondChampInconnu', 'valeur');
+
+    expect(uploadResponse.status).toBe(400);
+    expect(uploadResponse.body.error).toBe('Envoi de fichier invalide');
+    expect(await countRowsCreatedByForgedUser()).toEqual({ nodeCount: 0, binaryCount: 0 });
+  });
+
+  it('renvoie 400 pour un champ texte de plus de 1024 octets', async () => {
+    const uploadResponse = await forgedAgent
+      .post('/api/files')
+      .attach('file', PNG_BYTES, { filename: 'logo.png', contentType: 'image/png' })
+      .field('champInconnu', 'a'.repeat(1025));
+
+    expect(uploadResponse.status).toBe(400);
+    expect(uploadResponse.body.error).toBe('Envoi de fichier invalide');
+    expect(await countRowsCreatedByForgedUser()).toEqual({ nodeCount: 0, binaryCount: 0 });
+  });
+});
+
+describe("limitation du nombre d'envois de fichiers binaires", () => {
+  it('renvoie 429 après la limite pour un utilisateur sans bloquer un autre utilisateur', async () => {
+    const limitedAgent = await createAuthenticatedAgent(LIMITED_EMAIL);
+    const unlimitedAgent = await createAuthenticatedAgent(UNLIMITED_EMAIL);
+    const uploadStatuses = [];
+
+    for (let uploadIndex = 0; uploadIndex < BINARY_FILE_UPLOAD_LIMIT; uploadIndex += 1) {
+      const uploadResponse = await uploadBinary(limitedAgent, PLAIN_TEXT_BYTES, {
+        filename: `limite-${uploadIndex}.txt`,
+        contentType: 'text/plain',
+      });
+      uploadStatuses.push(uploadResponse.status);
+    }
+    const exceededResponse = await uploadBinary(limitedAgent, PLAIN_TEXT_BYTES, {
+      filename: 'limite-depassee.txt',
+      contentType: 'text/plain',
+    });
+    const otherUserResponse = await uploadBinary(unlimitedAgent, PLAIN_TEXT_BYTES, {
+      filename: 'autre-utilisateur.txt',
+      contentType: 'text/plain',
+    });
+
+    expect(uploadStatuses.every((uploadStatus) => uploadStatus === 201)).toBe(true);
+    expect(exceededResponse.status).toBe(429);
+    expect(otherUserResponse.status).toBe(201);
   });
 });

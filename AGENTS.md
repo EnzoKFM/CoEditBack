@@ -27,7 +27,7 @@ Le Node de l'hôte peut être trop ancien : ne pas lancer les tests hors du cont
 sql/schema.sql                         schéma, en CREATE TABLE IF NOT EXISTS
 src/app.js                             application Express (routes et gestion des erreurs), sans listen
 src/server.js                          écoute HTTP et branchement de Socket.IO
-src/routes/*.js                        /api/folders, /api/nodes, /api/files (envoi multipart des binaires via multer)
+src/routes/*.js                        /api/folders, /api/nodes, /api/files (envoi multipart des binaires via multer, type réel contrôlé par file-type)
 src/controllers/nodeController.js      lecture de la requête, validation, appel du service
 src/validators/nodeValidator.js        parse ou lève une HttpError 400
 src/services/nodeService.js            tout le SQL des nœuds, avec les transactions (withTransaction) et le calcul des droits (findNodeAccess)

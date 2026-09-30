@@ -13,6 +13,10 @@ const WAIT_FOR_INTERVAL_MS = 20;
 const COLLABORATION_TEST_EMAIL = 'collaboration@coedit.test';
 const GUEST_TEST_EMAIL = 'collaboration-invite@coedit.test';
 const ADMIN_TEST_EMAIL = 'collaboration-admin@coedit.test';
+const PNG_BYTES = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+);
 
 let httpServer;
 let io;
@@ -179,7 +183,7 @@ describe('document:join', () => {
   it("renvoie une erreur quand l'identifiant désigne un fichier binaire", async () => {
     const uploadResponse = await authenticatedAgent
       .post('/api/files')
-      .attach('file', Buffer.from([1, 2, 3]), { filename: 'image.png', contentType: 'image/png' });
+      .attach('file', PNG_BYTES, { filename: 'image.png', contentType: 'image/png' });
     const socket = await connectClient();
 
     const joinAcknowledgement = await joinDocument(socket, uploadResponse.body.id, { name: 'Alice' });
