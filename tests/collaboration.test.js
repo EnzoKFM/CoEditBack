@@ -630,6 +630,119 @@ describe('appel audio', () => {
   });
 });
 
+describe('messagerie', () => {
+  it("diffuse le message aux autres participants avec l'auteur authentifié, pas le nom envoyé par le client", async () => {
+    const createdFile = (await createFile('chat.txt')).body;
+    const socketA = await connectClient();
+    const socketB = await connectClient();
+    await joinDocument(socketA, createdFile.id, { name: 'Faux nom' });
+    await joinDocument(socketB, createdFile.id, { name: 'Bob' });
+
+    const messageReceivedByB = waitForEvent(socketB, 'chat:message');
+    const sendAcknowledgement = await socketA.emitWithAck('chat:send', { text: 'Bonjour' });
+    const receivedMessage = await messageReceivedByB;
+
+    expect(sendAcknowledgement.error).toBeUndefined();
+    expect(sendAcknowledgement.message).toEqual(receivedMessage);
+    expect(receivedMessage).toMatchObject({ text: 'Bonjour', author: { name: 'Test Utilisateur' } });
+    expect(receivedMessage.author.userId).toEqual(expect.any(Number));
+  });
+
+  it("n'envoie pas le message à son propre expéditeur ni aux autres documents", async () => {
+    const chatFile = (await createFile('chat.txt')).body;
+    const otherFile = (await createFile('autre.txt')).body;
+    const sender = await connectClient();
+    const otherDocumentReader = await connectClient();
+    await joinDocument(sender, chatFile.id, { name: 'Alice' });
+    await joinDocument(otherDocumentReader, otherFile.id, { name: 'Bob' });
+    const receivedBySender = vi.fn();
+    const receivedByOtherDocument = vi.fn();
+    sender.on('chat:message', receivedBySender);
+    otherDocumentReader.on('chat:message', receivedByOtherDocument);
+
+    await sender.emitWithAck('chat:send', { text: 'Bonjour' });
+    await otherDocumentReader.emitWithAck('chat:history');
+
+    expect(receivedBySender).not.toHaveBeenCalled();
+    expect(receivedByOtherDocument).not.toHaveBeenCalled();
+  });
+
+  it("donne l'historique de la session à un nouvel arrivant", async () => {
+    const createdFile = (await createFile('chat.txt')).body;
+    const firstParticipant = await connectClient();
+    await joinDocument(firstParticipant, createdFile.id, { name: 'Alice' });
+    await firstParticipant.emitWithAck('chat:send', { text: 'Premier' });
+    await firstParticipant.emitWithAck('chat:send', { text: 'Second' });
+
+    const newcomer = await connectClient();
+    await joinDocument(newcomer, createdFile.id, { name: 'Bob' });
+    const historyAcknowledgement = await newcomer.emitWithAck('chat:history');
+
+    expect(historyAcknowledgement.messages.map((chatMessage) => chatMessage.text)).toEqual(['Premier', 'Second']);
+  });
+
+  it('refuse un message vide ou trop long', async () => {
+    const createdFile = (await createFile('chat.txt')).body;
+    const socket = await connectClient();
+    await joinDocument(socket, createdFile.id, { name: 'Alice' });
+
+    const emptyAcknowledgement = await socket.emitWithAck('chat:send', { text: '   ' });
+    const tooLongAcknowledgement = await socket.emitWithAck('chat:send', { text: 'a'.repeat(1001) });
+
+    expect(emptyAcknowledgement.error).toBe('Le message est vide');
+    expect(tooLongAcknowledgement.error).toBe('Le message ne doit pas dépasser 1000 caractères');
+  });
+
+  it('refuse les messages et l’historique sans document rejoint', async () => {
+    const socket = await connectClient();
+
+    expect((await socket.emitWithAck('chat:send', { text: 'Bonjour' })).error).toBe('Aucun document rejoint');
+    expect((await socket.emitWithAck('chat:history')).error).toBe('Aucun document rejoint');
+  });
+
+  it('efface les messages quand plus personne ne travaille sur le document', async () => {
+    const createdFile = (await createFile('chat.txt')).body;
+    const firstParticipant = await connectClient();
+    await joinDocument(firstParticipant, createdFile.id, { name: 'Alice' });
+    await firstParticipant.emitWithAck('chat:send', { text: 'Éphémère' });
+
+    firstParticipant.disconnect();
+    await vi.waitFor(() => expect(io.of('/').sockets.size).toBe(0), {
+      timeout: WAIT_FOR_TIMEOUT_MS,
+      interval: WAIT_FOR_INTERVAL_MS,
+    });
+
+    const nextParticipant = await connectClient();
+    await joinDocument(nextParticipant, createdFile.id, { name: 'Bob' });
+    const historyAcknowledgement = await nextParticipant.emitWithAck('chat:history');
+
+    expect(historyAcknowledgement.messages).toEqual([]);
+  });
+
+  it("refuse les messages d'un utilisateur au-delà de la limite anti-spam", async () => {
+    const { socketServer, port } = await startDedicatedCollaboration({
+      storeDebounceMs: STORE_DEBOUNCE_MS,
+      storeMaxDebounceMs: STORE_MAX_DEBOUNCE_MS,
+      chatMessageLimit: 2,
+      chatMessageWindowMs: 60000,
+    });
+    try {
+      const createdFile = (await createFile('spam.txt')).body;
+      const socket = await connectClient(sessionCookie, port);
+      await joinDocument(socket, createdFile.id, { name: 'Alice' });
+
+      await socket.emitWithAck('chat:send', { text: 'un' });
+      const secondAcknowledgement = await socket.emitWithAck('chat:send', { text: 'deux' });
+      const rejectedAcknowledgement = await socket.emitWithAck('chat:send', { text: 'trois' });
+
+      expect(secondAcknowledgement.error).toBeUndefined();
+      expect(rejectedAcknowledgement.error).toBe('Trop de messages envoyés : réessayez dans quelques secondes');
+    } finally {
+      await new Promise((resolve) => socketServer.close(resolve));
+    }
+  });
+});
+
 describe('limitation du débit des sockets', () => {
   it("refuse les messages d'un utilisateur au-delà de la limite de la fenêtre", async () => {
     const { socketServer, port } = await startDedicatedCollaboration({

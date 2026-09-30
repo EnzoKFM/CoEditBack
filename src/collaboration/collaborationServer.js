@@ -13,6 +13,8 @@ const DEFAULT_MAX_HISTORY_SIZE = 1000000;
 const DEFAULT_MAX_DOCUMENT_LENGTH = 5000000;
 const DEFAULT_SOCKET_EVENT_LIMIT = 100;
 const DEFAULT_SOCKET_EVENT_WINDOW_MS = 1000;
+const DEFAULT_CHAT_MESSAGE_LIMIT = 10;
+const DEFAULT_CHAT_MESSAGE_WINDOW_MS = 10000;
 const MAX_SOCKET_MESSAGE_BYTES = 1000000;
 const MAX_USER_NAME_LENGTH = 100;
 const MAX_USER_COLOR_LENGTH = 32;
@@ -70,10 +72,13 @@ export function createCollaboration({
   maxDocumentLength = DEFAULT_MAX_DOCUMENT_LENGTH,
   socketEventLimit = DEFAULT_SOCKET_EVENT_LIMIT,
   socketEventWindowMs = DEFAULT_SOCKET_EVENT_WINDOW_MS,
+  chatMessageLimit = DEFAULT_CHAT_MESSAGE_LIMIT,
+  chatMessageWindowMs = DEFAULT_CHAT_MESSAGE_WINDOW_MS,
 } = {}) {
   const sessionPromisesByFileId = new Map();
   const audioCallRegistry = new AudioCallRegistry();
   const isSocketEventAllowed = createEventRateLimiter({ maxEvents: socketEventLimit, windowMs: socketEventWindowMs });
+  const isChatMessageAllowed = createEventRateLimiter({ maxEvents: chatMessageLimit, windowMs: chatMessageWindowMs });
   let socketServer = null;
 
   function loadSession(fileId) {
@@ -219,6 +224,42 @@ export function createCollaboration({
         if (collaborator) {
           socket.to(toRoomName(session.fileId)).emit('presence:update', collaborator);
         }
+      });
+
+      socket.on('chat:send', (chatRequest, acknowledge) => {
+        if (typeof acknowledge !== 'function') {
+          return;
+        }
+        const session = socket.data.session;
+        if (!session) {
+          acknowledge({ error: 'Aucun document rejoint' });
+          return;
+        }
+        if (!isChatMessageAllowed(socket.data.user.id)) {
+          acknowledge({ error: 'Trop de messages envoyés : réessayez dans quelques secondes' });
+          return;
+        }
+        try {
+          const { id: userId, firstName, lastName } = socket.data.user;
+          const chatMessage = session.addChatMessage({ userId, name: `${firstName} ${lastName}` }, chatRequest?.text);
+          socket.to(toRoomName(session.fileId)).emit('chat:message', chatMessage);
+          acknowledge({ message: chatMessage });
+        } catch (error) {
+          acknowledge({ error: error.message });
+        }
+      });
+
+      socket.on('chat:history', (...eventArguments) => {
+        const acknowledge = eventArguments.at(-1);
+        if (typeof acknowledge !== 'function') {
+          return;
+        }
+        const session = socket.data.session;
+        if (!session) {
+          acknowledge({ error: 'Aucun document rejoint' });
+          return;
+        }
+        acknowledge({ messages: session.listChatMessages() });
       });
 
       socket.on('call:invite', (inviteRequest, acknowledge) => {

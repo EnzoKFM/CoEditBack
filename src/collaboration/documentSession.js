@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { storeFileDocument } from '../services/nodeService.js';
 import {
   InvalidOperationError,
@@ -8,6 +9,9 @@ import {
 } from './textOperation.js';
 
 export class ResyncRequiredError extends Error {}
+
+export const MAX_CHAT_MESSAGE_LENGTH = 1000;
+export const MAX_CHAT_HISTORY_LENGTH = 50;
 
 export class DocumentSession {
   constructor({
@@ -31,6 +35,7 @@ export class DocumentSession {
     this.maxHistorySize = maxHistorySize;
     this.maxDocumentLength = maxDocumentLength;
     this.collaboratorsByClientId = new Map();
+    this.chatMessages = [];
     this.storeDebounceMs = storeDebounceMs;
     this.storeMaxDebounceMs = storeMaxDebounceMs;
     this.storeTimer = null;
@@ -68,6 +73,32 @@ export class DocumentSession {
     collaborator.selection = this.parseSelection(selection);
     collaborator.pointer = parsePointer(pointer);
     return collaborator;
+  }
+
+  addChatMessage(author, rawText) {
+    const text = typeof rawText === 'string' ? rawText.trim() : '';
+    if (!text) {
+      throw new Error('Le message est vide');
+    }
+    if (text.length > MAX_CHAT_MESSAGE_LENGTH) {
+      throw new Error(`Le message ne doit pas dépasser ${MAX_CHAT_MESSAGE_LENGTH} caractères`);
+    }
+
+    const chatMessage = {
+      id: randomUUID(),
+      author: { userId: author.userId, name: author.name },
+      text,
+      sentAt: new Date().toISOString(),
+    };
+    this.chatMessages.push(chatMessage);
+    if (this.chatMessages.length > MAX_CHAT_HISTORY_LENGTH) {
+      this.chatMessages.shift();
+    }
+    return chatMessage;
+  }
+
+  listChatMessages() {
+    return [...this.chatMessages];
   }
 
   parseSelection(selection) {

@@ -207,6 +207,24 @@ Le serveur sauvegarde lui-même : 2 s après la dernière opération, au plus ta
 - 100 messages par seconde et par utilisateur, tous événements confondus ; au-delà, le message est ignoré et son accusé reçoit `{ error: 'Trop de messages envoyés : réessayez dans un instant' }`.
 - Un message Socket.IO ne peut pas dépasser 1 Mo.
 
+## Messagerie instantanée
+
+Les collaborateurs d'un même document peuvent échanger des messages pendant la session d'édition, sur la même connexion Socket.IO. Il faut avoir rejoint le document (`document:join`), sinon `{ error: 'Aucun document rejoint' }`.
+
+| Sens | Événement | Contenu |
+|---|---|---|
+| client → serveur | `chat:send` (ack) | `{ text }` → `{ message }` ou `{ error }` |
+| client → serveur | `chat:history` (ack) | → `{ messages }` ou `{ error }` |
+| serveur → clients | `chat:message` | `message` |
+
+Un `message` vaut `{ id, author: { userId, name }, text, sentAt }`.
+
+- **L'auteur est fixé par le serveur** à partir de l'utilisateur connecté : le nom envoyé dans `document:join` n'est pas utilisé, on ne peut donc pas écrire au nom de quelqu'un d'autre.
+- `chat:message` est diffusé aux autres participants du document, pas à l'expéditeur : celui-ci reçoit son message dans l'accusé de `chat:send`.
+- **Les messages sont éphémères** : ils vivent en mémoire avec le document et disparaissent quand plus personne n'y travaille. `chat:history` donne à un nouvel arrivant les 50 derniers messages de la session en cours.
+- Un message fait de 1 à 1 000 caractères (espaces de début et de fin retirés). Au-delà de 10 messages en 10 secondes par utilisateur : `{ error: 'Trop de messages envoyés : réessayez dans quelques secondes' }`.
+- Côté front, afficher le texte comme du texte brut, sans mise en forme.
+
 ## Appels audio (WebRTC)
 
 Deux collaborateurs d'un même document peuvent s'appeler en tête-à-tête. L'audio circule directement entre les navigateurs via WebRTC : le serveur ne sert que de signalisation, sur la même connexion Socket.IO que la collaboration, et ne voit jamais passer le son.
