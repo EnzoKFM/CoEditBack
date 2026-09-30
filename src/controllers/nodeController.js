@@ -2,10 +2,12 @@ import { HttpError } from '../errors/HttpError.js';
 import * as nodeService from '../services/nodeService.js';
 import {
   parseNodeId,
+  parseMimeType,
   parseParentId,
   validateContent,
   validateNodeName,
   validateNodeType,
+  validateUploadedFile,
 } from '../validators/nodeValidator.js';
 
 export async function listRootChildren(request, response) {
@@ -62,4 +64,35 @@ export async function deleteNode(request, response) {
 export async function getFileContent(request, response) {
   const fileId = parseNodeId(request.params.fileId);
   response.json(await nodeService.getFileContent(fileId, request.user));
+}
+
+export async function uploadBinaryFile(request, response) {
+  const requestBody = request.body ?? {};
+  const uploadedFile = validateUploadedFile(request.file);
+  const createdNode = await nodeService.createNode({
+    parentId: parseParentId(requestBody.parentId),
+    type: 'file',
+    name: validateNodeName(requestBody.name ?? uploadedFile.originalname),
+    binaryFile: { mimeType: parseMimeType(uploadedFile.mimetype), data: uploadedFile.buffer },
+    user: request.user,
+  });
+  response.status(201).json(createdNode);
+}
+
+export async function downloadBinaryFile(request, response) {
+  const fileId = parseNodeId(request.params.fileId);
+  const binaryFile = await nodeService.getBinaryFile(fileId, request.user);
+  response.attachment(binaryFile.name);
+  response.type(binaryFile.mimeType);
+  response.send(binaryFile.data);
+}
+
+export async function replaceBinaryFile(request, response) {
+  const fileId = parseNodeId(request.params.fileId);
+  const uploadedFile = validateUploadedFile(request.file);
+  const replacedNode = await nodeService.replaceBinaryFile(fileId, request.user, {
+    mimeType: parseMimeType(uploadedFile.mimetype),
+    data: uploadedFile.buffer,
+  });
+  response.json(replacedNode);
 }

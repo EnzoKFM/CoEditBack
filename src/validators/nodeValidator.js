@@ -3,6 +3,9 @@ import { HttpError } from '../errors/HttpError.js';
 const NODE_TYPES = ['folder', 'file'];
 const NAME_MAX_LENGTH = 255;
 const POSITIVE_INTEGER_PATTERN = /^[1-9]\d*$/;
+const MIME_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
+const MIME_TYPE_MAX_LENGTH = 255;
+const DEFAULT_MIME_TYPE = 'application/octet-stream';
 
 export function parseNodeId(rawNodeId) {
   if (!['string', 'number'].includes(typeof rawNodeId) || !POSITIVE_INTEGER_PATTERN.test(String(rawNodeId))) {
@@ -48,4 +51,18 @@ export function validateContent(rawContent) {
     throw new HttpError(400, 'Le contenu doit être une chaîne de caractères');
   }
   return rawContent;
+}
+
+export function validateUploadedFile(uploadedFile) {
+  if (!uploadedFile) {
+    throw new HttpError(400, 'Le fichier est obligatoire (champ « file »)');
+  }
+  return uploadedFile;
+}
+
+export function parseMimeType(rawMimeType) {
+  const normalizedMimeType = typeof rawMimeType === 'string' ? rawMimeType.trim().toLowerCase() : '';
+  const isValidMimeType =
+    normalizedMimeType.length <= MIME_TYPE_MAX_LENGTH && MIME_TYPE_PATTERN.test(normalizedMimeType);
+  return isValidMimeType ? normalizedMimeType : DEFAULT_MIME_TYPE;
 }

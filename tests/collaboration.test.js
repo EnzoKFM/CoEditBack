@@ -176,6 +176,18 @@ describe('document:join', () => {
     expect(joinAcknowledgement.error).toBeDefined();
   });
 
+  it("renvoie une erreur quand l'identifiant désigne un fichier binaire", async () => {
+    const uploadResponse = await authenticatedAgent
+      .post('/api/files')
+      .attach('file', Buffer.from([1, 2, 3]), { filename: 'image.png', contentType: 'image/png' });
+    const socket = await connectClient();
+
+    const joinAcknowledgement = await joinDocument(socket, uploadResponse.body.id, { name: 'Alice' });
+
+    expect(uploadResponse.status).toBe(201);
+    expect(joinAcknowledgement.error).toBeDefined();
+  });
+
   it('renvoie une erreur pour un identifiant de fichier invalide', async () => {
     const socket = await connectClient();
 
