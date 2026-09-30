@@ -654,6 +654,48 @@ describe('appel audio', () => {
     expect(secondInviteAcknowledgement.error).toBeUndefined();
     expect(incomingSecondCallPayload.callId).toBe(secondInviteAcknowledgement.callId);
   });
+
+  it("relaie l'état du micro uniquement à l'interlocuteur d'un appel accepté", async () => {
+    const createdFile = (await createFile('micro.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const bystander = await createConnectedClient(createdFile.id, { name: 'Carol' });
+    const muteReceivedByBystander = vi.fn();
+    bystander.socket.on('call:mute', muteReceivedByBystander);
+    const inviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+    await acceptCall(callee.socket, inviteAcknowledgement.callId);
+
+    const mutedReceivedByCallee = waitForEvent(callee.socket, 'call:mute');
+    caller.socket.emit('call:mute', { muted: true });
+    expect(await mutedReceivedByCallee).toEqual({ clientId: caller.clientId, muted: true });
+
+    const unmutedReceivedByCaller = waitForEvent(caller.socket, 'call:mute');
+    callee.socket.emit('call:mute', { muted: false });
+    expect(await unmutedReceivedByCaller).toEqual({ clientId: callee.clientId, muted: false });
+
+    await bystander.socket.emitWithAck('chat:history');
+    expect(muteReceivedByBystander).not.toHaveBeenCalled();
+  });
+
+  it("ignore l'état du micro avant l'acceptation de l'appel ou s'il est invalide", async () => {
+    const createdFile = (await createFile('micro-refus.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const muteReceivedByCallee = vi.fn();
+    callee.socket.on('call:mute', muteReceivedByCallee);
+
+    caller.socket.emit('call:mute', { muted: true });
+    const inviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+    caller.socket.emit('call:mute', { muted: true });
+    await acceptCall(callee.socket, inviteAcknowledgement.callId);
+    caller.socket.emit('call:mute', { muted: 'oui' });
+    caller.socket.emit('call:mute');
+    await callee.socket.emitWithAck('chat:history');
+    await caller.socket.emitWithAck('chat:history');
+    await callee.socket.emitWithAck('chat:history');
+
+    expect(muteReceivedByCallee).not.toHaveBeenCalled();
+  });
 });
 
 describe('messagerie', () => {

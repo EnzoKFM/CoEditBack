@@ -269,16 +269,19 @@ Deux collaborateurs d'un même document peuvent s'appeler en tête-à-tête. L'a
 | client → serveur | `call:invite` (ack) | `{ targetClientId }` → `{ callId }` ou `{ error }` |
 | client → serveur | `call:accept` (ack) | `{ callId }` → `{ callId }` ou `{ error }` |
 | client → serveur | `call:signal` | `{ targetClientId, description: { type, sdp } }` ou `{ targetClientId, candidate: { candidate, sdpMid, sdpMLineIndex, usernameFragment } }` |
+| client → serveur | `call:mute` | `{ muted }` (booléen) |
 | client → serveur | `call:hangup` | |
 | serveur → client | `call:incoming` | `{ callId, caller: { clientId, user } }` |
 | serveur → client | `call:accepted` | `{ callId, clientId }` |
 | serveur → client | `call:signal` | `{ clientId, description }` ou `{ clientId, candidate }` |
+| serveur → client | `call:mute` | `{ clientId, muted }` |
 | serveur → client | `call:ended` | `{ callId, reason: 'declined' \| 'hangup' }` |
 
 - `targetClientId` est le `clientId` d'un collaborateur reçu dans `collaborators` ou `presence:update`. L'invitation est refusée si la cible n'est pas sur le même document, si l'un des deux est déjà en appel (sonnerie comprise) ou si l'on s'appelle soi-même.
 - Un client ne participe qu'à un appel à la fois. `call:hangup` annule une invitation (`reason: 'hangup'` pour l'appelé), refuse un appel entrant (`reason: 'declined'` pour l'appelant) ou raccroche un appel en cours.
 - Quitter le document (`document:leave`, `document:join` d'un autre fichier, déconnexion) raccroche automatiquement.
 - `call:signal` n'est relayé qu'entre les deux participants d'un appel accepté ; un signal invalide ou hors appel est ignoré. `description.type` vaut `offer` ou `answer`.
+- `call:mute` informe l'interlocuteur que l'on a coupé ou réactivé son micro : un micro coupé envoie du silence, que le navigateur qui reçoit l'audio ne peut pas distinguer d'un silence normal. Le serveur retrouve lui-même l'appel et ne relaie qu'à l'autre participant d'un appel accepté ; avant l'acceptation, ou si `muted` n'est pas un booléen, l'événement est ignoré.
 
 ### Algorithme côté front
 

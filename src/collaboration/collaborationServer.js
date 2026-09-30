@@ -320,6 +320,14 @@ export function createCollaboration({
         }
       });
 
+      socket.on('call:mute', (muteRequest) => {
+        const call = audioCallRegistry.findCallOfClient(socket.id);
+        if (!call?.isAccepted || typeof muteRequest?.muted !== 'boolean') {
+          return;
+        }
+        io.to(getPeerClientId(call, socket.id)).emit('call:mute', { clientId: socket.id, muted: muteRequest.muted });
+      });
+
       socket.on('call:hangup', () => hangUpCall(socket));
 
       socket.on('document:leave', () => leaveDocument(socket));
