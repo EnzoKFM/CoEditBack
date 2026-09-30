@@ -27,13 +27,17 @@ CREATE TABLE IF NOT EXISTS nodes (
   type ENUM('folder', 'file') NOT NULL,
   name VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_ci NOT NULL,
   owner_id INT UNSIGNED NULL,
+  created_by INT UNSIGNED NULL,
+  updated_by INT UNSIGNED NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_nodes_parent_name (parent_key, root_owner_key, name),
   KEY idx_nodes_parent (parent_id),
   CONSTRAINT fk_nodes_parent FOREIGN KEY (parent_id) REFERENCES nodes (id) ON DELETE CASCADE,
-  CONSTRAINT fk_nodes_owner FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE SET NULL
+  CONSTRAINT fk_nodes_owner FOREIGN KEY (owner_id) REFERENCES users (id) ON DELETE SET NULL,
+  CONSTRAINT fk_nodes_created_by FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL,
+  CONSTRAINT fk_nodes_updated_by FOREIGN KEY (updated_by) REFERENCES users (id) ON DELETE SET NULL
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
 CREATE TABLE IF NOT EXISTS file_contents (

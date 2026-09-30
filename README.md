@@ -51,7 +51,7 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 ## Modèle de données
 
 - `users` : comptes (`role` = `user` | `admin`), mot de passe haché avec bcrypt. `is_blocked` empêche la connexion et la navigation sur le site; `token_version` invalide les sessions ouvertes quand il est incrémenté (déconnexion, changement de mot de passe). 2FA : `totp_secret` (chiffré en AES-256-GCM, jamais en clair), `totp_enabled`, et `totp_last_time_step` (dernier créneau de 30 s accepté, pour qu'un code ne serve qu'une fois).
-- `nodes` : dossiers et fichiers (`type` = `folder` | `file`), rattachés à leur parent par `parent_id` (`NULL` = racine). Deux éléments d'un même dossier ne peuvent pas porter le même nom (comparaison insensible à la casse, sensible aux accents) ; à la racine, l'unicité vaut par propriétaire (colonne générée `root_owner_key`). `owner_id` est le propriétaire : l'utilisateur qui crée un élément à la racine, puis le propriétaire du dossier parent pour tout élément créé dedans, y compris par un invité. Il est remis à `NULL` si le compte est supprimé, et l'élément n'est alors plus accessible qu'aux administrateurs.
+- `nodes` : dossiers et fichiers (`type` = `folder` | `file`), rattachés à leur parent par `parent_id` (`NULL` = racine). Deux éléments d'un même dossier ne peuvent pas porter le même nom (comparaison insensible à la casse, sensible aux accents) ; à la racine, l'unicité vaut par propriétaire (colonne générée `root_owner_key`). `owner_id` est le propriétaire : l'utilisateur qui crée un élément à la racine, puis le propriétaire du dossier parent pour tout élément créé dedans, y compris par un invité. Il est remis à `NULL` si le compte est supprimé, et l'élément n'est alors plus accessible qu'aux administrateurs. `created_by` est l'utilisateur qui a créé l'élément (qui peut être un invité, contrairement à `owner_id`) et `updated_by` le dernier à l'avoir modifié (création, renommage, déplacement, ou édition du contenu en direct) ; tous deux passent à `NULL` si le compte est supprimé.
 - `folder_shares` : partages d'un dossier avec un utilisateur (`folder_id`, `user_id`, `permission` = `read` | `write` | `delete`), supprimés avec le dossier ou le compte.
 - `file_contents` : texte du document (`content`), `revision` (nombre d'opérations appliquées, voir la collaboration) et `version` (incrémentée à chaque sauvegarde).
 
@@ -129,7 +129,7 @@ Toutes les routes de documents exigent une session (401 sinon). Un élément auq
 | GET | `/api/folders/root/children` | | Contenu de la racine de l'utilisateur connecté |
 | GET | `/api/folders/:folderId/children` | | Contenu d'un dossier |
 | POST | `/api/nodes` | `{ parentId, type, name, content? }` | 201 + élément créé ; `write` requis sur le dossier parent |
-| GET | `/api/nodes/:nodeId` | | Métadonnées de l'élément : `{ id, parentId, type, name, ownerId, permission, createdAt, updatedAt }` |
+| GET | `/api/nodes/:nodeId` | | Métadonnées de l'élément : `{ id, parentId, type, name, ownerId, permission, createdAt, createdBy, updatedAt, updatedBy }` |
 | PATCH | `/api/nodes/:nodeId` | `{ name?, parentId? }` | Élément renommé et/ou déplacé |
 | DELETE | `/api/nodes/:nodeId` | | 204, descendants compris |
 | GET | `/api/files/:fileId/content` | | `{ content, version, updatedAt }` |
@@ -161,11 +161,21 @@ Le dossier partagé lui-même ne peut être renommé, déplacé ou supprimé que
   "folder": { "id": 4, "name": "Cours", "parentId": 1, "permission": "owner" },
   "breadcrumb": [{ "id": 1, "name": "Projets" }, { "id": 4, "name": "Cours" }],
   "children": [
-    { "id": 7, "name": "TP", "type": "folder", "childrenCount": 3, "updatedAt": "2026-09-28T10:00:00.000Z" },
-    { "id": 9, "name": "notes.txt", "type": "file", "size": 1204, "updatedAt": "2026-09-28T10:05:00.000Z" }
+    {
+      "id": 7, "name": "TP", "type": "folder", "childrenCount": 3,
+      "createdAt": "2026-09-27T09:00:00.000Z", "createdBy": { "id": 1, "name": "Alice Martin" },
+      "updatedAt": "2026-09-28T10:00:00.000Z", "updatedBy": { "id": 1, "name": "Alice Martin" }
+    },
+    {
+      "id": 9, "name": "notes.txt", "type": "file", "size": 1204,
+      "createdAt": "2026-09-27T09:05:00.000Z", "createdBy": { "id": 1, "name": "Alice Martin" },
+      "updatedAt": "2026-09-28T10:05:00.000Z", "updatedBy": { "id": 2, "name": "Bob Durand" }
+    }
   ]
 }
 ```
+
+`createdBy` et `updatedBy` valent `{ id, name }`, ou `null` si le compte a été supprimé. `updatedAt` et `updatedBy` suivent aussi les éditions en direct : ils sont mis à jour à chaque sauvegarde automatique, avec l'auteur de la dernière opération appliquée.
 
 À la racine, `folder` vaut `null` et `breadcrumb` est vide. Les dossiers sont listés avant les fichiers, puis par nom. Pour un invité, `breadcrumb` commence au dossier partagé et `folder.parentId` vaut `null` sur ce dossier, pour ne pas exposer l'arborescence du propriétaire.
 
