@@ -275,14 +275,14 @@ Un `message` vaut `{ id, author: { userId, name }, text, sentAt }`.
 
 ## Appels audio (WebRTC)
 
-Deux collaborateurs d'un même document peuvent s'appeler en tête-à-tête. L'audio circule directement entre les navigateurs via WebRTC : le serveur ne sert que de signalisation, sur la même connexion Socket.IO que la collaboration, et ne voit jamais passer le son.
+Les collaborateurs d'un même document peuvent s'appeler, jusqu'à 6 personnes par appel. Chaque participant ouvre une connexion WebRTC directe avec chacun des autres (maillage). L'audio circule directement entre les navigateurs via WebRTC : le serveur ne sert que de signalisation, sur la même connexion Socket.IO que la collaboration, et ne voit jamais passer le son.
 
 ### Événements
 
 | Sens | Événement | Contenu |
 |---|---|---|
 | client → serveur | `call:invite` (ack) | `{ targetClientId }` → `{ callId }` ou `{ error }` |
-| client → serveur | `call:accept` (ack) | `{ callId }` → `{ callId }` ou `{ error }` |
+| client → serveur | `call:accept` (ack) | `{ callId }` → `{ callId, participants: [{ clientId, user }] }` ou `{ error }` |
 | client → serveur | `call:signal` | `{ targetClientId, description: { type, sdp } }` ou `{ targetClientId, candidate: { candidate, sdpMid, sdpMLineIndex, usernameFragment } }` |
 | client → serveur | `call:mute` | `{ muted }` (booléen) |
 | client → serveur | `call:hangup` | |
@@ -290,20 +290,22 @@ Deux collaborateurs d'un même document peuvent s'appeler en tête-à-tête. L'a
 | serveur → client | `call:accepted` | `{ callId, clientId }` |
 | serveur → client | `call:signal` | `{ clientId, description }` ou `{ clientId, candidate }` |
 | serveur → client | `call:mute` | `{ clientId, muted }` |
+| serveur → client | `call:left` | `{ callId, clientId, reason: 'declined' \| 'hangup' }` |
 | serveur → client | `call:ended` | `{ callId, reason: 'declined' \| 'hangup' }` |
 
-- `targetClientId` est le `clientId` d'un collaborateur reçu dans `collaborators` ou `presence:update`. L'invitation est refusée si la cible n'est pas sur le même document, si l'un des deux est déjà en appel (sonnerie comprise) ou si l'on s'appelle soi-même.
-- Un client ne participe qu'à un appel à la fois. `call:hangup` annule une invitation (`reason: 'hangup'` pour l'appelé), refuse un appel entrant (`reason: 'declined'` pour l'appelant) ou raccroche un appel en cours.
+- `targetClientId` est le `clientId` d'un collaborateur reçu dans `collaborators` ou `presence:update`. L'invitation est refusée si la cible n'est pas sur le même document, si elle est déjà dans un appel (sonnerie comprise), si l'on s'appelle soi-même, si l'on a soi-même un appel en attente de réponse ou si l'appel compte déjà 6 personnes (invitations en attente comprises).
+- Sans appel en cours, `call:invite` crée un appel ; pendant un appel, n'importe quel participant peut inviter une personne de plus dans le même appel (même `callId`).
+- Un client ne participe qu'à un appel à la fois. `call:hangup` refuse un appel entrant (`reason: 'declined'`) ou quitte l'appel (`reason: 'hangup'`). Les participants restants reçoivent `call:left` ; l'appel s'arrête (`call:ended` pour les personnes restantes) quand il n'a plus de participant, ou qu'il n'en reste qu'un sans invitation en attente.
 - Quitter le document (`document:leave`, `document:join` d'un autre fichier, déconnexion) raccroche automatiquement.
-- `call:signal` n'est relayé qu'entre les deux participants d'un appel accepté ; un signal invalide ou hors appel est ignoré. `description.type` vaut `offer` ou `answer`.
-- `call:mute` informe l'interlocuteur que l'on a coupé ou réactivé son micro : un micro coupé envoie du silence, que le navigateur qui reçoit l'audio ne peut pas distinguer d'un silence normal. Le serveur retrouve lui-même l'appel et ne relaie qu'à l'autre participant d'un appel accepté ; avant l'acceptation, ou si `muted` n'est pas un booléen, l'événement est ignoré.
+- `call:signal` n'est relayé qu'entre deux participants d'un même appel, ayant accepté ; un signal invalide ou hors appel est ignoré. `description.type` vaut `offer` ou `answer`.
+- `call:mute` informe les autres participants que l'on a coupé ou réactivé son micro : un micro coupé envoie du silence, que le navigateur qui reçoit l'audio ne peut pas distinguer d'un silence normal. Le serveur retrouve lui-même l'appel et relaie aux autres participants ; avant l'acceptation, ou si `muted` n'est pas un booléen, l'événement est ignoré.
 
 ### Algorithme côté front
 
-1. L'appelant envoie `call:invite` ; l'appelé reçoit `call:incoming` et répond par `call:accept` ou `call:hangup`.
-2. À `call:accepted`, l'appelant crée un `RTCPeerConnection`, y ajoute la piste micro (`getUserMedia({ audio: true })`), puis envoie `createOffer()` en `call:signal { description }`.
-3. L'appelé, à la réception de l'offre, crée son `RTCPeerConnection` avec sa piste micro, applique `setRemoteDescription`, puis renvoie `createAnswer()` en `call:signal { description }`.
-4. Chaque `icecandidate` local part en `call:signal { candidate }` ; chaque candidat reçu est passé à `addIceCandidate`. La piste distante (`track`) est branchée sur un élément `<audio autoplay>`.
-5. À `call:ended` ou en raccrochant : fermer le `RTCPeerConnection` et arrêter les pistes micro.
+1. Un participant envoie `call:invite` ; la personne invitée reçoit `call:incoming` et répond par `call:accept` ou `call:hangup`.
+2. En acceptant, elle reçoit dans l'accusé la liste `participants`. Pour chacun, elle crée un `RTCPeerConnection`, y ajoute la piste micro (`getUserMedia({ audio: true })`), puis envoie `createOffer()` en `call:signal { targetClientId, description }`. C'est toujours le nouvel arrivant qui fait l'offre, ce qui évite deux offres croisées.
+3. Les participants déjà présents reçoivent `call:accepted`, créent un `RTCPeerConnection` pour le nouvel arrivant avec leur piste micro, et répondent à son offre par `createAnswer()`.
+4. Chaque `icecandidate` local part en `call:signal { candidate }` vers le pair concerné ; chaque candidat reçu est passé à `addIceCandidate`. Chaque piste distante (`track`) est branchée sur son propre élément `<audio autoplay>`.
+5. À `call:left`, fermer la connexion avec ce participant. À `call:ended` ou en raccrochant : fermer toutes les connexions et arrêter les pistes micro.
 
 Le `RTCPeerConnection` doit être configuré avec au moins un serveur STUN (par exemple `stun:stun.l.google.com:19302`) ; un serveur TURN sera nécessaire derrière les réseaux qui bloquent le pair-à-pair.

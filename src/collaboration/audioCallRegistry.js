@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
+export const MAX_CALL_MEMBERS = 6;
+
 export class AudioCallRegistry {
   constructor() {
     this.callsById = new Map();
@@ -11,44 +13,76 @@ export class AudioCallRegistry {
     return callId ? this.callsById.get(callId) : null;
   }
 
-  startCall({ callerClientId, calleeClientId }) {
-    if (callerClientId === calleeClientId) {
+  inviteToCall({ inviterClientId, inviteeClientId }) {
+    if (inviterClientId === inviteeClientId) {
       throw new Error("Impossible de s'appeler soi-même");
     }
-    if (this.callIdsByClientId.has(callerClientId)) {
+    const existingCall = this.findCallOfClient(inviterClientId);
+    if (existingCall && !existingCall.participantClientIds.has(inviterClientId)) {
       throw new Error('Vous êtes déjà en appel');
     }
-    if (this.callIdsByClientId.has(calleeClientId)) {
+    if (this.callIdsByClientId.has(inviteeClientId)) {
       throw new Error('Correspondant déjà en appel');
     }
-    const call = { callId: randomUUID(), callerClientId, calleeClientId, isAccepted: false };
+    if (existingCall && countCallMembers(existingCall) >= MAX_CALL_MEMBERS) {
+      throw new Error(`L'appel est complet (${MAX_CALL_MEMBERS} personnes maximum)`);
+    }
+    const call = existingCall ?? this.createCall(inviterClientId);
+    call.invitedClientIds.add(inviteeClientId);
+    this.callIdsByClientId.set(inviteeClientId, call.callId);
+    return call;
+  }
+
+  createCall(callerClientId) {
+    const call = {
+      callId: randomUUID(),
+      participantClientIds: new Set([callerClientId]),
+      invitedClientIds: new Set(),
+    };
     this.callsById.set(call.callId, call);
     this.callIdsByClientId.set(callerClientId, call.callId);
-    this.callIdsByClientId.set(calleeClientId, call.callId);
     return call;
   }
 
-  acceptCall(callId, calleeClientId) {
+  acceptCall(callId, inviteeClientId) {
     const call = this.callsById.get(callId);
-    if (!call || call.calleeClientId !== calleeClientId || call.isAccepted) {
+    if (!call || !call.invitedClientIds.has(inviteeClientId)) {
       throw new Error('Appel introuvable');
     }
-    call.isAccepted = true;
+    call.invitedClientIds.delete(inviteeClientId);
+    call.participantClientIds.add(inviteeClientId);
     return call;
   }
 
-  endCall(call) {
-    this.callsById.delete(call.callId);
-    this.callIdsByClientId.delete(call.callerClientId);
-    this.callIdsByClientId.delete(call.calleeClientId);
+  leaveCall(call, clientId) {
+    const wasInvited = call.invitedClientIds.delete(clientId);
+    call.participantClientIds.delete(clientId);
+    this.callIdsByClientId.delete(clientId);
+    const isEnded =
+      call.participantClientIds.size === 0 || (call.participantClientIds.size === 1 && call.invitedClientIds.size === 0);
+    if (isEnded) {
+      this.callsById.delete(call.callId);
+      for (const remainingClientId of [...call.participantClientIds, ...call.invitedClientIds]) {
+        this.callIdsByClientId.delete(remainingClientId);
+      }
+    }
+    return { wasInvited, isEnded };
   }
 
   isInAcceptedCallWith(clientId, peerClientId) {
     const call = this.findCallOfClient(clientId);
-    return Boolean(call?.isAccepted) && getPeerClientId(call, clientId) === peerClientId;
+    return (
+      clientId !== peerClientId &&
+      Boolean(call?.participantClientIds.has(clientId)) &&
+      call.participantClientIds.has(peerClientId)
+    );
   }
 }
 
-export function getPeerClientId(call, clientId) {
-  return call.callerClientId === clientId ? call.calleeClientId : call.callerClientId;
+export function listOtherParticipants(call, clientId) {
+  return [...call.participantClientIds].filter((participantClientId) => participantClientId !== clientId);
+}
+
+function countCallMembers(call) {
+  return call.participantClientIds.size + call.invitedClientIds.size;
 }
