@@ -559,14 +559,14 @@ describe('appel audio', () => {
     expect(inviteAcknowledgement.error).toBe("Impossible de s'appeler soi-même");
   });
 
-  it("call:invite renvoie une erreur quand l'appelant est déjà en appel", async () => {
+  it("call:invite renvoie une erreur quand l'appelant a un appel en attente de réponse", async () => {
     const createdFile = (await createFile('appelant-occupe.txt', null, 'contenu')).body;
     const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
-    const firstCallee = await createConnectedClient(createdFile.id, { name: 'Bob' });
-    const secondCallee = await createConnectedClient(createdFile.id, { name: 'Carla' });
-    await inviteCall(caller.socket, firstCallee.clientId);
+    const ringingCallee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const thirdPerson = await createConnectedClient(createdFile.id, { name: 'Carla' });
+    await inviteCall(caller.socket, ringingCallee.clientId);
 
-    const inviteAcknowledgement = await inviteCall(caller.socket, secondCallee.clientId);
+    const inviteAcknowledgement = await inviteCall(ringingCallee.socket, thirdPerson.clientId);
 
     expect(inviteAcknowledgement.error).toBe('Vous êtes déjà en appel');
   });
@@ -722,6 +722,144 @@ describe('appel audio', () => {
     await callee.socket.emitWithAck('chat:history');
 
     expect(muteReceivedByCallee).not.toHaveBeenCalled();
+  });
+
+  async function addToCall(inviter, invitee) {
+    const inviteAcknowledgement = await inviteCall(inviter.socket, invitee.clientId);
+    await acceptCall(invitee.socket, inviteAcknowledgement.callId);
+    return inviteAcknowledgement.callId;
+  }
+
+  async function startGroupCall(fileName) {
+    const createdFile = (await createFile(fileName, null, 'contenu')).body;
+    const alice = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const bob = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const carla = await createConnectedClient(createdFile.id, { name: 'Carla' });
+    const callId = await addToCall(alice, bob);
+    await addToCall(bob, carla);
+    return { createdFile, alice, bob, carla, callId };
+  }
+
+  it("un participant invite une troisième personne qui reçoit la liste des participants à joindre", async () => {
+    const createdFile = (await createFile('appel-groupe.txt', null, 'contenu')).body;
+    const alice = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const bob = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const carla = await createConnectedClient(createdFile.id, { name: 'Carla' });
+    const callId = await addToCall(alice, bob);
+
+    const incomingCallReceivedByCarla = waitForEvent(carla.socket, 'call:incoming');
+    const inviteAcknowledgement = await inviteCall(bob.socket, carla.clientId);
+    expect(inviteAcknowledgement).toEqual({ callId });
+    expect(await incomingCallReceivedByCarla).toEqual({
+      callId,
+      caller: { clientId: bob.clientId, user: { name: 'Bob', color: null } },
+    });
+
+    const acceptedReceivedByAlice = waitForEvent(alice.socket, 'call:accepted');
+    const acceptedReceivedByBob = waitForEvent(bob.socket, 'call:accepted');
+    const acceptAcknowledgement = await acceptCall(carla.socket, callId);
+
+    expect(await acceptedReceivedByAlice).toEqual({ callId, clientId: carla.clientId });
+    expect(await acceptedReceivedByBob).toEqual({ callId, clientId: carla.clientId });
+    expect(acceptAcknowledgement.participants).toHaveLength(2);
+    expect(acceptAcknowledgement.participants).toEqual(
+      expect.arrayContaining([
+        { clientId: alice.clientId, user: { name: 'Alice', color: null } },
+        { clientId: bob.clientId, user: { name: 'Bob', color: null } },
+      ]),
+    );
+
+    const offerReceivedByAlice = waitForEvent(alice.socket, 'call:signal');
+    carla.socket.emit('call:signal', { targetClientId: alice.clientId, description: { type: 'offer', sdp: 'offre-a' } });
+    expect(await offerReceivedByAlice).toEqual({
+      clientId: carla.clientId,
+      description: { type: 'offer', sdp: 'offre-a' },
+    });
+  });
+
+  it("un participant qui raccroche quitte l'appel sans l'arrêter pour les autres", async () => {
+    const { alice, bob, carla, callId } = await startGroupCall('appel-groupe-depart.txt');
+
+    const leftReceivedByAlice = waitForEvent(alice.socket, 'call:left');
+    const leftReceivedByCarla = waitForEvent(carla.socket, 'call:left');
+    bob.socket.emit('call:hangup');
+
+    expect(await leftReceivedByAlice).toEqual({ callId, clientId: bob.clientId, reason: 'hangup' });
+    expect(await leftReceivedByCarla).toEqual({ callId, clientId: bob.clientId, reason: 'hangup' });
+
+    const signalReceivedByAlice = vi.fn();
+    alice.socket.on('call:signal', signalReceivedByAlice);
+    bob.socket.emit('call:signal', { targetClientId: alice.clientId, description: { type: 'offer', sdp: 'ignoree' } });
+    await bob.socket.emitWithAck('chat:history');
+    const offerReceivedByAlice = waitForEvent(alice.socket, 'call:signal');
+    carla.socket.emit('call:signal', { targetClientId: alice.clientId, description: { type: 'offer', sdp: 'offre-c' } });
+    expect(await offerReceivedByAlice).toEqual({ clientId: carla.clientId, description: { type: 'offer', sdp: 'offre-c' } });
+    expect(signalReceivedByAlice).toHaveBeenCalledTimes(1);
+
+    const callEndedReceivedByAlice = waitForEvent(alice.socket, 'call:ended');
+    carla.socket.emit('call:hangup');
+    expect(await callEndedReceivedByAlice).toEqual({ callId, reason: 'hangup' });
+  });
+
+  it("un refus pendant un appel en cours prévient les participants sans arrêter l'appel", async () => {
+    const createdFile = (await createFile('appel-groupe-refus.txt', null, 'contenu')).body;
+    const alice = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const bob = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const carla = await createConnectedClient(createdFile.id, { name: 'Carla' });
+    const callId = await addToCall(alice, bob);
+    await inviteCall(alice.socket, carla.clientId);
+
+    const leftReceivedByAlice = waitForEvent(alice.socket, 'call:left');
+    const leftReceivedByBob = waitForEvent(bob.socket, 'call:left');
+    carla.socket.emit('call:hangup');
+
+    expect(await leftReceivedByAlice).toEqual({ callId, clientId: carla.clientId, reason: 'declined' });
+    expect(await leftReceivedByBob).toEqual({ callId, clientId: carla.clientId, reason: 'declined' });
+  });
+
+  it("relaie l'état du micro à tous les autres participants de l'appel", async () => {
+    const { alice, bob, carla } = await startGroupCall('appel-groupe-micro.txt');
+
+    const muteReceivedByBob = waitForEvent(bob.socket, 'call:mute');
+    const muteReceivedByCarla = waitForEvent(carla.socket, 'call:mute');
+    alice.socket.emit('call:mute', { muted: true });
+
+    expect(await muteReceivedByBob).toEqual({ clientId: alice.clientId, muted: true });
+    expect(await muteReceivedByCarla).toEqual({ clientId: alice.clientId, muted: true });
+  });
+
+  it('refuse une invitation au-delà de six personnes dans un appel', async () => {
+    const createdFile = (await createFile('appel-complet-six.txt', null, 'contenu')).body;
+    const clients = [];
+    for (let clientIndex = 0; clientIndex < 7; clientIndex += 1) {
+      clients.push(await createConnectedClient(createdFile.id, { name: `Personne ${clientIndex}` }));
+    }
+    const [host, ...guests] = clients;
+    for (const guest of guests.slice(0, 5)) {
+      expect((await inviteCall(host.socket, guest.clientId)).error).toBeUndefined();
+    }
+
+    const inviteAcknowledgement = await inviteCall(host.socket, guests[5].clientId);
+
+    expect(inviteAcknowledgement.error).toBe("L'appel est complet (6 personnes maximum)");
+  });
+
+  it('ne relaie pas les signaux entre deux appels différents', async () => {
+    const createdFile = (await createFile('deux-appels.txt', null, 'contenu')).body;
+    const alice = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const bob = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const carla = await createConnectedClient(createdFile.id, { name: 'Carla' });
+    const david = await createConnectedClient(createdFile.id, { name: 'David' });
+    await addToCall(alice, bob);
+    await addToCall(carla, david);
+    const signalReceivedByCarla = vi.fn();
+    carla.socket.on('call:signal', signalReceivedByCarla);
+
+    alice.socket.emit('call:signal', { targetClientId: carla.clientId, description: { type: 'offer', sdp: 'intrus' } });
+    await alice.socket.emitWithAck('chat:history');
+    await carla.socket.emitWithAck('chat:history');
+
+    expect(signalReceivedByCarla).not.toHaveBeenCalled();
   });
 });
 

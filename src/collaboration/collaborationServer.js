@@ -2,7 +2,7 @@ import cookieParser from 'cookie-parser';
 import { Server } from 'socket.io';
 import { authenticateSocket } from '../middlewares/auth.js';
 import { findFileAccess, findFileDocument } from '../services/nodeService.js';
-import { AudioCallRegistry, getPeerClientId } from './audioCallRegistry.js';
+import { AudioCallRegistry, listOtherParticipants } from './audioCallRegistry.js';
 import { DocumentSession, ResyncRequiredError } from './documentSession.js';
 import { createEventRateLimiter } from './eventRateLimiter.js';
 
@@ -128,17 +128,27 @@ export function createCollaboration({
     io.engine.use(cookieParser());
     io.use(authenticateSocket);
 
+    function emitToClients(clientIds, eventName, payload) {
+      if (clientIds.length > 0) {
+        io.to(clientIds).emit(eventName, payload);
+      }
+    }
+
     function hangUpCall(socket) {
       const call = audioCallRegistry.findCallOfClient(socket.id);
       if (!call) {
         return;
       }
-      audioCallRegistry.endCall(call);
-      const isDeclined = !call.isAccepted && call.calleeClientId === socket.id;
-      io.to(getPeerClientId(call, socket.id)).emit('call:ended', {
-        callId: call.callId,
-        reason: isDeclined ? 'declined' : 'hangup',
-      });
+      const { wasInvited, isEnded } = audioCallRegistry.leaveCall(call, socket.id);
+      const reason = wasInvited ? 'declined' : 'hangup';
+      if (isEnded) {
+        emitToClients([...call.participantClientIds, ...call.invitedClientIds], 'call:ended', {
+          callId: call.callId,
+          reason,
+        });
+        return;
+      }
+      emitToClients([...call.participantClientIds], 'call:left', { callId: call.callId, clientId: socket.id, reason });
     }
 
     async function leaveDocument(socket) {
@@ -288,7 +298,7 @@ export function createCollaboration({
           return;
         }
         try {
-          const call = audioCallRegistry.startCall({ callerClientId: socket.id, calleeClientId: callee.clientId });
+          const call = audioCallRegistry.inviteToCall({ inviterClientId: socket.id, inviteeClientId: callee.clientId });
           const caller = session.findCollaborator(socket.id);
           io.to(callee.clientId).emit('call:incoming', {
             callId: call.callId,
@@ -306,8 +316,13 @@ export function createCollaboration({
         }
         try {
           const call = audioCallRegistry.acceptCall(acceptRequest?.callId, socket.id);
-          io.to(call.callerClientId).emit('call:accepted', { callId: call.callId, clientId: socket.id });
-          acknowledge({ callId: call.callId });
+          const otherParticipantClientIds = listOtherParticipants(call, socket.id);
+          emitToClients(otherParticipantClientIds, 'call:accepted', { callId: call.callId, clientId: socket.id });
+          const participants = otherParticipantClientIds
+            .map((participantClientId) => socket.data.session?.findCollaborator(participantClientId))
+            .filter(Boolean)
+            .map((participant) => ({ clientId: participant.clientId, user: participant.user }));
+          acknowledge({ callId: call.callId, participants });
         } catch (error) {
           acknowledge({ error: error.message });
         }
@@ -323,10 +338,13 @@ export function createCollaboration({
 
       socket.on('call:mute', (muteRequest) => {
         const call = audioCallRegistry.findCallOfClient(socket.id);
-        if (!call?.isAccepted || typeof muteRequest?.muted !== 'boolean') {
+        if (!call?.participantClientIds.has(socket.id) || typeof muteRequest?.muted !== 'boolean') {
           return;
         }
-        io.to(getPeerClientId(call, socket.id)).emit('call:mute', { clientId: socket.id, muted: muteRequest.muted });
+        emitToClients(listOtherParticipants(call, socket.id), 'call:mute', {
+          clientId: socket.id,
+          muted: muteRequest.muted,
+        });
       });
 
       socket.on('call:hangup', () => hangUpCall(socket));
