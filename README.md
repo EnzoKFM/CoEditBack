@@ -54,10 +54,11 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 - `nodes` : dossiers et fichiers (`type` = `folder` | `file`), rattachés à leur parent par `parent_id` (`NULL` = racine). Deux éléments d'un même dossier ne peuvent pas porter le même nom (comparaison insensible à la casse, sensible aux accents) ; à la racine, l'unicité vaut par propriétaire (colonne générée `root_owner_key`). `owner_id` est le propriétaire : l'utilisateur qui crée un élément à la racine, puis le propriétaire du dossier parent pour tout élément créé dedans, y compris par un invité. Il est remis à `NULL` si le compte est supprimé, et l'élément n'est alors plus accessible qu'aux administrateurs. `created_by` est l'utilisateur qui a créé l'élément (qui peut être un invité, contrairement à `owner_id`) et `updated_by` le dernier à l'avoir modifié (création, renommage, déplacement, ou édition du contenu en direct) ; tous deux passent à `NULL` si le compte est supprimé.
 - `folder_shares` : partages d'un dossier avec un utilisateur (`folder_id`, `user_id`, `permission` = `read` | `write` | `delete`), supprimés avec le dossier ou le compte.
 - `file_contents` : texte du document (`content`), `revision` (nombre d'opérations appliquées, voir la collaboration) et `version` (incrémentée à chaque sauvegarde).
+- `file_binaries` : contenu d'un fichier binaire (PDF, image…) : `mime_type`, octets (`data`, `LONGBLOB`), `size` en octets et `version` (incrémentée à chaque remplacement). Un fichier a soit une ligne `file_contents` (document texte co-édité), soit une ligne `file_binaries`. Table ajoutée après coup : sur une base existante, rejouer `npm run db:init` (le schéma ne crée que les tables absentes).
 
 ## API
 
-Toutes les erreurs renvoient `{ "error": "message" }` : 400 (requête invalide), 401 (non authentifié), 403 (accès refusé), 404 (élément introuvable), 409 (conflit de nom ou de version), 413 (corps > 5 Mo), 429 (trop de tentatives).
+Toutes les erreurs renvoient `{ "error": "message" }` : 400 (requête invalide), 401 (non authentifié), 403 (accès refusé), 404 (élément introuvable), 409 (conflit de nom ou de version), 413 (corps JSON > 5 Mo, fichier binaire > 20 Mo), 429 (trop de tentatives).
 
 ### Authentification
 
@@ -129,10 +130,13 @@ Toutes les routes de documents exigent une session (401 sinon). Un élément auq
 | GET | `/api/folders/root/children` | | Contenu de la racine de l'utilisateur connecté |
 | GET | `/api/folders/:folderId/children` | | Contenu d'un dossier |
 | POST | `/api/nodes` | `{ parentId, type, name, content? }` | 201 + élément créé ; `write` requis sur le dossier parent |
-| GET | `/api/nodes/:nodeId` | | Métadonnées de l'élément : `{ id, parentId, type, name, ownerId, permission, createdAt, createdBy, updatedAt, updatedBy }` |
+| GET | `/api/nodes/:nodeId` | | Métadonnées de l'élément : `{ id, parentId, type, name, ownerId, permission, mimeType, permission, createdAt, createdBy, updatedAt, updatedBy }` |
 | PATCH | `/api/nodes/:nodeId` | `{ name?, parentId? }` | Élément renommé et/ou déplacé |
 | DELETE | `/api/nodes/:nodeId` | | 204, descendants compris |
-| GET | `/api/files/:fileId/content` | | `{ content, version, updatedAt }` |
+| GET | `/api/files/:fileId/content` | | `{ content, version, updatedAt }` ; 400 sur un fichier binaire |
+| POST | `/api/files` | multipart : `file`, `parentId?`, `name?` | 201 + fichier binaire créé ; `write` requis sur le dossier parent |
+| GET | `/api/files/:fileId/binary` | | Octets du fichier binaire ; 400 sur un document texte |
+| PUT | `/api/files/:fileId/binary` | multipart : `file` | Fichier binaire remplacé ; `write` requis, 400 sur un document texte |
 
 ### Droits et partage
 
@@ -141,7 +145,7 @@ Chaque utilisateur ne voit que sa racine et les dossiers partagés avec lui. Les
 | `permission` | Autorise |
 |---|---|
 | `read` | Lister, lire les métadonnées et le contenu, rejoindre un document en lecture seule |
-| `write` | + créer des éléments, renommer, éditer le contenu en temps réel |
+| `write` | + créer des éléments, renommer, éditer le contenu en temps réel, remplacer un fichier binaire |
 | `delete` | + supprimer et déplacer |
 
 Le dossier partagé lui-même ne peut être renommé, déplacé ou supprimé que par son propriétaire. Un élément ne peut pas être déplacé vers l'espace d'un autre propriétaire (400). `permission` vaut `owner` dans les réponses pour le propriétaire et pour un administrateur.
@@ -167,7 +171,12 @@ Le dossier partagé lui-même ne peut être renommé, déplacé ou supprimé que
       "updatedAt": "2026-09-28T10:00:00.000Z", "updatedBy": { "id": 1, "name": "Alice Martin" }
     },
     {
-      "id": 9, "name": "notes.txt", "type": "file", "size": 1204,
+      "id": 9, "name": "notes.txt", "type": "file", "size": 1204, "mimeType": null,
+      "createdAt": "2026-09-27T09:05:00.000Z", "createdBy": { "id": 1, "name": "Alice Martin" },
+      "updatedAt": "2026-09-28T10:05:00.000Z", "updatedBy": { "id": 2, "name": "Bob Durand" }
+    },
+    {
+      "id": 12, "name": "plan.pdf", "type": "file", "size": 482133, "mimeType": "application/pdf",
       "createdAt": "2026-09-27T09:05:00.000Z", "createdBy": { "id": 1, "name": "Alice Martin" },
       "updatedAt": "2026-09-28T10:05:00.000Z", "updatedBy": { "id": 2, "name": "Bob Durand" }
     }
@@ -177,7 +186,8 @@ Le dossier partagé lui-même ne peut être renommé, déplacé ou supprimé que
 
 `createdBy` et `updatedBy` valent `{ id, name }`, ou `null` si le compte a été supprimé. `updatedAt` et `updatedBy` suivent aussi les éditions en direct : ils sont mis à jour à chaque sauvegarde automatique, avec l'auteur de la dernière opération appliquée.
 
-À la racine, `folder` vaut `null` et `breadcrumb` est vide. Les dossiers sont listés avant les fichiers, puis par nom. Pour un invité, `breadcrumb` commence au dossier partagé et `folder.parentId` vaut `null` sur ce dossier, pour ne pas exposer l'arborescence du propriétaire.
+
+À la racine, `folder` vaut `null` et `breadcrumb` est vide. Pour un fichier, `size` compte les caractères d'un document texte et les octets d'un fichier binaire ; `mimeType` vaut `null` pour un document texte et le type MIME d'un fichier binaire. Les dossiers sont listés avant les fichiers, puis par nom. Pour un invité, `breadcrumb` commence au dossier partagé et `folder.parentId` vaut `null` sur ce dossier, pour ne pas exposer l'arborescence du propriétaire.
 
 ### Déplacement
 
@@ -186,6 +196,12 @@ Le dossier partagé lui-même ne peut être renommé, déplacé ou supprimé que
 ### Lecture du contenu
 
 `GET /api/files/:fileId/content` renvoie la dernière copie texte sauvegardée. Le contenu ne se modifie pas en REST : toute édition passe par la collaboration temps réel.
+
+### Fichiers binaires
+
+Les PDF, images et autres fichiers non co-édités s'envoient en `multipart/form-data` sur `POST /api/files` : champ `file` (obligatoire, 20 Mo maximum), `parentId` (à omettre pour la racine) et `name` (nom d'origine du fichier par défaut). Le type MIME déclaré est celui de la partie `file` ; s'il est absent ou illisible, c'est `text/plain`, le défaut du multipart (RFC 7578). Le serveur contrôle ensuite le contenu réel grâce à sa signature (bibliothèque `file-type`) : si le type reconnu diffère du type déclaré, ou si le contenu ne porte pas la signature attendue d'un type qui en a une (un script renommé en `.png`, par exemple), l'envoi est refusé (400). Un type reconnu est enregistré à la place d'un `application/octet-stream` déclaré ; un contenu sans signature (texte, CSV…) garde son type déclaré. La requête accepte au plus deux champs texte d'1 Ko, et chaque utilisateur est limité à 60 envois ou remplacements par quart d'heure (429 au-delà).
+
+`GET /api/files/:fileId/binary` renvoie les octets avec leur `Content-Type` et un `Content-Disposition: attachment` ; côté front, le charger avec `fetch` (`credentials: 'include'`) puis l'afficher via `URL.createObjectURL`. `PUT /api/files/:fileId/binary` remplace le contenu et le type MIME sans changer le nom (renommer avec `PATCH /api/nodes/:nodeId`). Un fichier binaire ne peut pas être rejoint en collaboration, et un document texte ne peut pas être remplacé par cette route.
 
 ## Collaboration temps réel
 

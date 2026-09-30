@@ -37,3 +37,12 @@ export const twoFactorLoginLimiter = createFailureLimiter(10);
 // Routes du compte connecté qui vérifient le mot de passe (activation et désactivation de la 2FA),
 // comptées par utilisateur : une session volée ne permet pas de deviner le mot de passe
 export const passwordCheckLimiter = createFailureLimiter(10, (request) => `user:${request.user.id}`);
+
+export const BINARY_FILE_UPLOAD_LIMIT = 60;
+
+export const binaryFileUploadLimiter = rateLimit({
+  windowMs: WINDOW_MS,
+  limit: BINARY_FILE_UPLOAD_LIMIT,
+  message: { error: "Trop d'envois de fichiers, réessayez dans quelques minutes" },
+  keyGenerator: (request) => `user:${request.user.id}`,
+});

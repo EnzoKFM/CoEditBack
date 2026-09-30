@@ -27,7 +27,7 @@ Le Node de l'hôte peut être trop ancien : ne pas lancer les tests hors du cont
 sql/schema.sql                         schéma, en CREATE TABLE IF NOT EXISTS
 src/app.js                             application Express (routes et gestion des erreurs), sans listen
 src/server.js                          écoute HTTP et branchement de Socket.IO
-src/routes/*.js                        /api/folders, /api/nodes, /api/files
+src/routes/*.js                        /api/folders, /api/nodes, /api/files (envoi multipart des binaires via multer, type réel contrôlé par file-type)
 src/controllers/nodeController.js      lecture de la requête, validation, appel du service
 src/validators/nodeValidator.js        parse ou lève une HttpError 400
 src/services/nodeService.js            tout le SQL des nœuds, avec les transactions (withTransaction) et le calcul des droits (findNodeAccess)
@@ -42,12 +42,13 @@ tests/*.test.js                        tests d'intégration sur une vraie base M
 Modèle de données :
 - `nodes` : dossiers et fichiers, organisés en liste d'adjacence (`parent_id` vaut NULL à la racine). Le nom est unique par dossier via `UNIQUE(parent_key, root_owner_key, name)`, où `parent_key` = `COALESCE(parent_id, 0)` couvre aussi la racine et `root_owner_key` = `owner_id` à la racine (0 ailleurs) y rend l'unicité propre à chaque propriétaire.
 - `file_contents` : `content`, `revision` (nombre d'opérations OT appliquées), `version` (nombre de sauvegardes).
+- `file_binaries` : fichiers binaires (PDF, images…), `mime_type`, `data` en `LONGBLOB`, `size`, `version` (nombre de remplacements). Un fichier a soit une ligne `file_contents`, soit une ligne `file_binaries`.
 - `folder_shares` : partage d'un dossier avec un utilisateur, permission `read` < `write` < `delete`, héritée par tous les descendants. Tout nœud porte l'`owner_id` de la racine de son arbre ; tout accès passe par `findNodeAccess` (un administrateur y a le rang propriétaire sur tout nœud), et un nœud inaccessible répond 404.
 
 ## Règles à respecter
 
 - **Yjs est interdit** (consigne du projet), ainsi que tout ce qui repose dessus (Hocuspocus, y-websocket, bindings y-*). Ne pas introduire d'autre bibliothèque de synchronisation (ShareDB, Automerge…) sans accord explicite.
-- **Aucune écriture de contenu en REST.** Un document ne se modifie que par l'événement Socket.IO `document:operation`, et c'est le serveur qui sauvegarde (`DocumentSession.store`). Une route d'écriture de contenu contournerait l'OT.
+- **Aucune écriture de contenu texte en REST.** Un document texte ne se modifie que par l'événement Socket.IO `document:operation`, et c'est le serveur qui sauvegarde (`DocumentSession.store`). Une route d'écriture de contenu texte contournerait l'OT. Seuls les fichiers binaires se remplacent en REST (`PUT /api/files/:fileId/binary`), qui refuse les documents texte.
 - **Le serveur fait autorité** : toute opération est transformée contre l'historique depuis sa révision de base, dans `receiveOperation`, qui reste synchrone pour que l'ordre des opérations soit garanti. Toute modification de `textOperation.js` doit garder la convergence (testée dans `tests/textOperation.test.js`).
 - **Suppression d'un dossier** : elle se fait niveau par niveau, du plus profond au plus haut (`deleteNode`), parce qu'InnoDB limite les cascades à 15 niveaux (erreur 3008). Ne pas la remplacer par un simple `DELETE`.
 - **Évolution du schéma** : `schema.sql` ne crée que les tables absentes. Signaler toute modification, car les bases existantes doivent être migrées à la main ou recréées (`docker compose down -v`). La base de test, elle, est recréée à chaque lancement.
