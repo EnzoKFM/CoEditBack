@@ -294,6 +294,9 @@ Les collaborateurs d'un même document peuvent s'appeler, jusqu'à 12 personnes 
 | client → serveur | `call:mute` | `{ muted }` (booléen) |
 | client → serveur | `call:camera` (ack) | `{ enabled }` (booléen) → `{ enabled }` ou `{ error }` |
 | client → serveur | `call:hangup` | |
+| client → serveur | `call:status` (ack) | → `{ calls: [{ callId, participantClientIds }] }` ou `{ error }` |
+| client → serveur | `call:join-request` (ack) | `{ callId }` → `{ callId }` ou `{ error }` |
+| client → serveur | `call:join-decline` | `{ requesterClientId }` |
 | serveur → client | `call:incoming` | `{ callId, caller: { clientId, user } }` |
 | serveur → client | `call:accepted` | `{ callId, clientId }` |
 | serveur → client | `call:signal` | `{ clientId, description }` ou `{ clientId, candidate }` |
@@ -301,11 +304,16 @@ Les collaborateurs d'un même document peuvent s'appeler, jusqu'à 12 personnes 
 | serveur → client | `call:camera` | `{ clientId, enabled }` |
 | serveur → client | `call:left` | `{ callId, clientId, reason: 'declined' \| 'hangup' }` |
 | serveur → client | `call:ended` | `{ callId, reason: 'declined' \| 'hangup' }` |
+| serveur → client | `call:status` | `{ calls: [{ callId, participantClientIds }] }` |
+| serveur → client | `call:join-request` | `{ callId, requester: { clientId, user } }` |
+| serveur → client | `call:join-declined` | `{ callId, requesterClientId }` |
 
 - `targetClientId` est le `clientId` d'un collaborateur reçu dans `collaborators` ou `presence:update`. L'invitation est refusée si la cible n'est pas sur le même document, si elle est déjà dans un appel (sonnerie comprise), si l'on s'appelle soi-même, si l'on a soi-même un appel en attente de réponse ou si l'appel compte déjà 12 personnes (invitations en attente comprises).
 - Sans appel en cours, `call:invite` crée un appel ; pendant un appel, n'importe quel participant peut inviter une personne de plus dans le même appel (même `callId`).
 - Un client ne participe qu'à un appel à la fois. `call:hangup` refuse un appel entrant (`reason: 'declined'`) ou quitte l'appel (`reason: 'hangup'`). Les participants restants reçoivent `call:left` ; l'appel s'arrête (`call:ended` pour les personnes restantes) quand il n'a plus de participant, ou qu'il n'en reste qu'un sans invitation en attente.
 - Quitter le document (`document:leave`, `document:join` d'un autre fichier, déconnexion) raccroche automatiquement.
+- `call:status` donne les appels en cours du document, c'est-à-dire ceux qui réunissent au moins deux participants. Le serveur le rediffuse à toute la salle du document quand un participant entre dans un appel ou en sort.
+- Pour rejoindre un appel en cours, `call:join-request` transmet la demande à tous ses participants, avec l'identité du demandeur fixée par le serveur. Elle est refusée si le demandeur est déjà dans un appel (sonnerie comprise), si l'appel est inconnu, sur un autre document ou complet. Un participant l'accepte en invitant le demandeur (`call:invite`), dont le client accepte alors l'appel qu'il a demandé ; `call:join-decline` la refuse et prévient le demandeur et les autres participants par `call:join-declined`.
 - `call:signal` n'est relayé qu'entre deux participants d'un même appel, ayant accepté ; un signal invalide ou hors appel est ignoré. `description.type` vaut `offer` ou `answer`.
 - `call:mute` informe les autres participants que l'on a coupé ou réactivé son micro : un micro coupé envoie du silence, que le navigateur qui reçoit l'audio ne peut pas distinguer d'un silence normal. Le serveur retrouve lui-même l'appel et relaie aux autres participants ; avant l'acceptation, ou si `muted` n'est pas un booléen, l'événement est ignoré.
 - `call:camera` annonce qu'un participant allume ou coupe sa caméra : l'appel démarre micro seul. Le serveur retient les caméras allumées de chaque appel et refuse d'en allumer une septième (`{ error: '6 caméras sont déjà allumées dans cet appel' }`) ; la place se libère quand la caméra est coupée ou que la personne quitte l'appel. Le client demande la place avant d'allumer sa caméra. L'événement est refusé hors d'un appel accepté ou si `enabled` n'est pas un booléen, et ignoré sans accusé. La vidéo, comme l'audio, circule directement entre les navigateurs.

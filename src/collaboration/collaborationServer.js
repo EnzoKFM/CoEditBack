@@ -159,6 +159,23 @@ export function createCollaboration({
       }
     }
 
+    function listSessionCalls(session) {
+      const callsById = new Map();
+      for (const collaborator of session.listCollaborators()) {
+        const call = audioCallRegistry.findCallOfClient(collaborator.clientId);
+        if (call && call.participantClientIds.size >= 2) {
+          callsById.set(call.callId, { callId: call.callId, participantClientIds: [...call.participantClientIds] });
+        }
+      }
+      return [...callsById.values()];
+    }
+
+    function broadcastCallStatus(session) {
+      if (session) {
+        io.to(toRoomName(session.fileId)).emit('call:status', { calls: listSessionCalls(session) });
+      }
+    }
+
     function hangUpCall(socket) {
       const call = audioCallRegistry.findCallOfClient(socket.id);
       if (!call) {
@@ -171,9 +188,12 @@ export function createCollaboration({
           callId: call.callId,
           reason,
         });
-        return;
+      } else {
+        emitToClients([...call.participantClientIds], 'call:left', { callId: call.callId, clientId: socket.id, reason });
       }
-      emitToClients([...call.participantClientIds], 'call:left', { callId: call.callId, clientId: socket.id, reason });
+      if (!wasInvited) {
+        broadcastCallStatus(socket.data.session);
+      }
     }
 
     async function leaveDocument(socket) {
@@ -409,9 +429,61 @@ export function createCollaboration({
             .filter(Boolean)
             .map((participant) => ({ clientId: participant.clientId, user: participant.user }));
           acknowledge({ callId: call.callId, participants });
+          broadcastCallStatus(socket.data.session);
         } catch (error) {
           acknowledge({ error: error.message });
         }
+      });
+
+      socket.on('call:status', (...eventArguments) => {
+        const acknowledge = eventArguments.at(-1);
+        if (typeof acknowledge !== 'function') {
+          return;
+        }
+        const session = socket.data.session;
+        if (!session) {
+          acknowledge({ error: 'Aucun document rejoint' });
+          return;
+        }
+        acknowledge({ calls: listSessionCalls(session) });
+      });
+
+      socket.on('call:join-request', (joinRequest, acknowledge) => {
+        if (typeof acknowledge !== 'function') {
+          return;
+        }
+        const session = socket.data.session;
+        if (!session) {
+          acknowledge({ error: 'Aucun document rejoint' });
+          return;
+        }
+        try {
+          const call = audioCallRegistry.findCallForJoinRequest(joinRequest?.callId, socket.id);
+          const participantClientIds = [...call.participantClientIds];
+          if (!participantClientIds.every((participantClientId) => session.findCollaborator(participantClientId))) {
+            throw new Error('Appel introuvable');
+          }
+          const requester = session.findCollaborator(socket.id);
+          emitToClients(participantClientIds, 'call:join-request', {
+            callId: call.callId,
+            requester: { clientId: requester.clientId, user: requester.user },
+          });
+          acknowledge({ callId: call.callId });
+        } catch (error) {
+          acknowledge({ error: error.message });
+        }
+      });
+
+      socket.on('call:join-decline', (declineRequest) => {
+        const call = audioCallRegistry.findCallOfClient(socket.id);
+        const requesterClientId = declineRequest?.requesterClientId;
+        if (!call?.participantClientIds.has(socket.id) || !socket.data.session?.findCollaborator(requesterClientId)) {
+          return;
+        }
+        emitToClients([requesterClientId, ...listOtherParticipants(call, socket.id)], 'call:join-declined', {
+          callId: call.callId,
+          requesterClientId,
+        });
       });
 
       socket.on('call:signal', (signalRequest) => {
