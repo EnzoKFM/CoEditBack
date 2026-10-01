@@ -18,6 +18,8 @@ export const cookieOptions = {
 // Longueur minimale du secret JWT pour éviter les attaques par force brute
 const JWT_SECRET_MIN_LENGTH = 32;
 
+const JWT_ALGORITHM = 'HS256';
+
 // Clé secrète pour le token JWT
 function getJwtSecret() {
   const jwtSecret = process.env.JWT_SECRET;
@@ -34,12 +36,12 @@ export function checkJwtSecret() {
 
 // Génère un token JWT du type demandé, valable durationMs
 export function signJwt(payload, type, durationMs) {
-  return jwt.sign({ ...payload, type }, getJwtSecret(), { expiresIn: durationMs / 1000 });
+  return jwt.sign({ ...payload, type }, getJwtSecret(), { expiresIn: durationMs / 1000, algorithm: JWT_ALGORITHM });
 }
 
 // Vérifie le token JWT puis si le type est correct et retourne son contenu si valide, sinon lance une erreur
 export function verifyJwt(token, expectedType) {
-  const tokenPayload = jwt.verify(token, getJwtSecret());
+  const tokenPayload = jwt.verify(token, getJwtSecret(), { algorithms: [JWT_ALGORITHM] });
   if (tokenPayload.type !== expectedType) {
     throw new Error('Type de token inattendu');
   }

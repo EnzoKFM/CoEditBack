@@ -1,5 +1,6 @@
 import { pool } from '../db.js';
 import { HttpError } from '../errors/HttpError.js';
+import { notifyAccessChanged } from '../lib/accessChanges.js';
 import { getOwnedFolder } from './nodeService.js';
 
 function toShareResponse(shareRow) {
@@ -88,6 +89,7 @@ export async function shareFolder(folderId, requester, { email, permission }) {
     }
     throw error;
   }
+  notifyAccessChanged();
   return toShareResponse(await findShare(folderId, invitee.id));
 }
 
@@ -99,6 +101,7 @@ export async function updateFolderShare(folderId, requester, inviteeId, permissi
     folderId,
     inviteeId,
   ]);
+  notifyAccessChanged();
   return toShareResponse(await findShare(folderId, inviteeId));
 }
 
@@ -109,6 +112,7 @@ export async function deleteFolderShare(folderId, requester, inviteeId) {
   }
   await getExistingShare(folderId, inviteeId);
   await pool.query('DELETE FROM folder_shares WHERE folder_id = ? AND user_id = ?', [folderId, inviteeId]);
+  notifyAccessChanged();
 }
 
 export async function listSharedFolders(userId) {

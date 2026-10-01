@@ -9,6 +9,10 @@ export function errorHandler(error, request, response, next) {
     return response.status(409).json({ error: 'Un élément portant ce nom existe déjà dans ce dossier' });
   }
 
+  if (error.code === 'ER_NO_REFERENCED_ROW_2') {
+    return response.status(404).json({ error: 'Dossier introuvable' });
+  }
+
   if (error.type === 'entity.parse.failed') {
     return response.status(400).json({ error: 'Corps de requête JSON invalide' });
   }

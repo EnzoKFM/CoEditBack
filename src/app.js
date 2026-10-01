@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
+import { parseTrustProxy } from './config/environment.js';
 import { requireAuth } from './middlewares/auth.js';
 import { errorHandler } from './middlewares/errorHandler.js';
 import { adminUserRoutes } from './routes/adminUserRoutes.js';
@@ -14,8 +15,9 @@ import { twoFactorRoutes } from './routes/twoFactorRoutes.js';
 
 export const app = express();
 
-if (process.env.TRUST_PROXY) {
-  app.set('trust proxy', Number(process.env.TRUST_PROXY));
+const trustProxyHops = parseTrustProxy(process.env.TRUST_PROXY);
+if (trustProxyHops !== null) {
+  app.set('trust proxy', trustProxyHops);
 }
 
 app.use(helmet());

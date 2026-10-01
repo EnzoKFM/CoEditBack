@@ -745,15 +745,15 @@ describe('droits administrateur', () => {
     expect(shareResponse.status).toBe(400);
   });
 
-  it("renvoie 400 pour déplacer l'élément d'un utilisateur vers la racine de l'administrateur", async () => {
+  it("déplace l'élément d'un utilisateur vers la racine de son propriétaire, pas vers celle de l'administrateur", async () => {
     const parentFolder = (await createFolder(ownerAgent, 'Parent')).body;
     const movedFolder = (await createFolder(ownerAgent, 'Déplacé', parentFolder.id)).body;
 
     const moveResponse = await adminAgent.patch(`/api/nodes/${movedFolder.id}`).send({ parentId: null });
     const ownerNodeResponse = await ownerAgent.get(`/api/nodes/${movedFolder.id}`);
 
-    expect(moveResponse.status).toBe(400);
-    expect(ownerNodeResponse.body.parentId).toBe(parentFolder.id);
+    expect(moveResponse.status).toBe(200);
+    expect(ownerNodeResponse.body.parentId).toBeNull();
     expect(ownerNodeResponse.body.ownerId).toBe(ownerUser.id);
   });
 });

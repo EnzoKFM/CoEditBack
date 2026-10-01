@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DocumentSession,
   MAX_CHAT_HISTORY_LENGTH,
@@ -6,6 +6,7 @@ import {
   ResyncRequiredError,
 } from '../src/collaboration/documentSession.js';
 import { InvalidOperationError } from '../src/collaboration/textOperation.js';
+import * as nodeService from '../src/services/nodeService.js';
 import { createNode } from '../src/services/nodeService.js';
 import { createTestUser, deleteTestUser } from './authHelper.js';
 import { closeDatabase, resetDatabase } from './databaseHelper.js';
@@ -16,7 +17,12 @@ const SESSION_OWNER_EMAIL = 'document-session@coedit.test';
 let session;
 let sessionOwner;
 
-async function createSession({ maxHistoryLength = 1000, maxHistorySize = 1000000, maxDocumentLength = 1000000 }) {
+async function createSession({
+  maxHistoryLength = 1000,
+  maxHistorySize = 1000000,
+  maxDocumentLength = 1000000,
+  storeDebounceMs = 60000,
+}) {
   const createdFile = await createNode({
     parentId: null,
     type: 'file',
@@ -28,7 +34,7 @@ async function createSession({ maxHistoryLength = 1000, maxHistorySize = 1000000
     fileId: createdFile.id,
     content: INITIAL_CONTENT,
     revision: 0,
-    storeDebounceMs: 60000,
+    storeDebounceMs,
     storeMaxDebounceMs: 60000,
     maxHistoryLength,
     maxHistorySize,
@@ -140,5 +146,25 @@ describe('messagerie de la session', () => {
     expect(chatMessages).toHaveLength(MAX_CHAT_HISTORY_LENGTH);
     expect(chatMessages[0].text).toBe('message 6');
     expect(chatMessages.at(-1).text).toBe(`message ${MAX_CHAT_HISTORY_LENGTH + 5}`);
+  });
+});
+
+describe('sauvegarde', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("ne considère pas la révision comme sauvegardée après un échec, puis la retente", async () => {
+    session = await createSession({ storeDebounceMs: 20 });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const storeSpy = vi.spyOn(nodeService, 'storeFileDocument').mockRejectedValueOnce(new Error('base indisponible'));
+    appendText(session, 'd');
+
+    await session.store();
+
+    expect(session.hasUnstoredChanges()).toBe(true);
+    await vi.waitFor(() => expect(session.hasUnstoredChanges()).toBe(false), { timeout: 3000, interval: 20 });
+    expect(storeSpy).toHaveBeenCalledTimes(2);
+    expect(storeSpy.mock.calls[1][1]).toMatchObject({ content: 'abcd', revision: 1 });
   });
 });

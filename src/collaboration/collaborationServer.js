@@ -1,6 +1,7 @@
 import cookieParser from 'cookie-parser';
 import { Server } from 'socket.io';
-import { authenticateSocket } from '../middlewares/auth.js';
+import { accessChanges } from '../lib/accessChanges.js';
+import { authenticateSocket, findSocketUser } from '../middlewares/auth.js';
 import { findFileAccess, findFileDocument } from '../services/nodeService.js';
 import { AudioCallRegistry, listOtherParticipants } from './audioCallRegistry.js';
 import { DocumentSession, ResyncRequiredError } from './documentSession.js';
@@ -15,9 +16,11 @@ const DEFAULT_SOCKET_EVENT_LIMIT = 100;
 const DEFAULT_SOCKET_EVENT_WINDOW_MS = 1000;
 const DEFAULT_CHAT_MESSAGE_LIMIT = 10;
 const DEFAULT_CHAT_MESSAGE_WINDOW_MS = 10000;
+const DEFAULT_ACCESS_CHECK_INTERVAL_MS = 60000;
+const DEFAULT_MAX_SOCKETS_PER_USER = 20;
 const MAX_SOCKET_MESSAGE_BYTES = 1000000;
 const MAX_USER_NAME_LENGTH = 100;
-const MAX_USER_COLOR_LENGTH = 32;
+const USER_COLOR_PATTERN = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 const DEFAULT_USER_NAME = 'Anonyme';
 const MAX_SESSION_DESCRIPTION_LENGTH = 100000;
 const MAX_ICE_CANDIDATE_LENGTH = 2000;
@@ -31,9 +34,9 @@ function parseFileId(rawFileId) {
   return fileId;
 }
 
-function parseUser(rawUser) {
-  const userName = typeof rawUser?.name === 'string' ? rawUser.name.trim().slice(0, MAX_USER_NAME_LENGTH) : '';
-  const userColor = typeof rawUser?.color === 'string' ? rawUser.color.slice(0, MAX_USER_COLOR_LENGTH) : null;
+function parseUser(rawUser, authenticatedUser) {
+  const userName = `${authenticatedUser.firstName} ${authenticatedUser.lastName}`.trim().slice(0, MAX_USER_NAME_LENGTH);
+  const userColor = typeof rawUser?.color === 'string' && USER_COLOR_PATTERN.test(rawUser.color) ? rawUser.color : null;
   return { name: userName || DEFAULT_USER_NAME, color: userColor };
 }
 
@@ -74,12 +77,15 @@ export function createCollaboration({
   socketEventWindowMs = DEFAULT_SOCKET_EVENT_WINDOW_MS,
   chatMessageLimit = DEFAULT_CHAT_MESSAGE_LIMIT,
   chatMessageWindowMs = DEFAULT_CHAT_MESSAGE_WINDOW_MS,
+  accessCheckIntervalMs = DEFAULT_ACCESS_CHECK_INTERVAL_MS,
+  maxSocketsPerUser = DEFAULT_MAX_SOCKETS_PER_USER,
 } = {}) {
   const sessionPromisesByFileId = new Map();
   const audioCallRegistry = new AudioCallRegistry();
   const isSocketEventAllowed = createEventRateLimiter({ maxEvents: socketEventLimit, windowMs: socketEventWindowMs });
   const isChatMessageAllowed = createEventRateLimiter({ maxEvents: chatMessageLimit, windowMs: chatMessageWindowMs });
   let socketServer = null;
+  let stopAccessWatching = () => {};
 
   function loadSession(fileId) {
     const existingSessionPromise = sessionPromisesByFileId.get(fileId);
@@ -91,7 +97,7 @@ export function createCollaboration({
       if (!fileDocument) {
         throw new Error('Fichier introuvable');
       }
-      return new DocumentSession({
+      const session = new DocumentSession({
         fileId,
         content: fileDocument.content,
         revision: fileDocument.revision,
@@ -100,7 +106,13 @@ export function createCollaboration({
         maxHistoryLength,
         maxHistorySize,
         maxDocumentLength,
+        onStored: () => {
+          if (!session.hasCollaborators()) {
+            unloadSessionIfIdle(session);
+          }
+        },
       });
+      return session;
     });
     sessionPromisesByFileId.set(fileId, sessionPromise);
     sessionPromise.catch(() => {
@@ -114,7 +126,10 @@ export function createCollaboration({
   async function unloadSessionIfIdle(session) {
     await session.store();
     const sessionPromise = sessionPromisesByFileId.get(session.fileId);
-    if (!session.hasCollaborators() && sessionPromise && (await sessionPromise) === session) {
+    if (!sessionPromise || (await sessionPromise) !== session) {
+      return;
+    }
+    if (!session.hasCollaborators() && !session.hasUnstoredChanges()) {
       sessionPromisesByFileId.delete(session.fileId);
     }
   }
@@ -127,6 +142,16 @@ export function createCollaboration({
     socketServer = io;
     io.engine.use(cookieParser());
     io.use(authenticateSocket);
+    io.use((socket, next) => {
+      const userSocketCount = [...io.of('/').sockets.values()].filter(
+        (connectedSocket) => connectedSocket.data.user?.id === socket.data.user.id,
+      ).length;
+      if (userSocketCount >= maxSocketsPerUser) {
+        next(new Error('Trop de connexions simultanées'));
+        return;
+      }
+      next();
+    });
 
     function emitToClients(clientIds, eventName, payload) {
       if (clientIds.length > 0) {
@@ -166,6 +191,59 @@ export function createCollaboration({
       }
     }
 
+    function runExclusivelyForSocket(socket, task) {
+      const previousTask = socket.data.pendingTask ?? Promise.resolve();
+      const currentTask = previousTask.then(task);
+      socket.data.pendingTask = currentTask.catch(() => {});
+      return currentTask;
+    }
+
+    async function revalidateSocketAccess(socket) {
+      const user = await findSocketUser(socket);
+      if (!user) {
+        socket.disconnect(true);
+        return;
+      }
+      socket.data.user = user;
+      const session = socket.data.session;
+      if (!session) {
+        return;
+      }
+      const fileAccess = await findFileAccess(session.fileId, user);
+      if (socket.data.session !== session) {
+        return;
+      }
+      if (!fileAccess) {
+        await leaveDocument(socket);
+        socket.emit('document:revoked', { fileId: session.fileId });
+        return;
+      }
+      if (fileAccess.canEdit !== socket.data.canEditDocument) {
+        socket.data.canEditDocument = fileAccess.canEdit;
+        socket.emit('document:permission', { fileId: session.fileId, permission: fileAccess.permission });
+      }
+    }
+
+    async function revalidateAllSockets() {
+      const connectedSockets = [...io.of('/').sockets.values()];
+      await Promise.allSettled(
+        connectedSockets.map((connectedSocket) =>
+          runExclusivelyForSocket(connectedSocket, () => revalidateSocketAccess(connectedSocket)).catch((error) =>
+            console.error('Revalidation des droits impossible :', error.message),
+          ),
+        ),
+      );
+    }
+
+    accessChanges.on('change', revalidateAllSockets);
+    const accessCheckTimer = setInterval(revalidateAllSockets, accessCheckIntervalMs);
+    accessCheckTimer.unref();
+    stopAccessWatching = () => {
+      accessChanges.off('change', revalidateAllSockets);
+      clearInterval(accessCheckTimer);
+    };
+    httpServer.once('close', stopAccessWatching);
+
     io.on('connection', (socket) => {
       socket.use(([, ...eventArguments], next) => {
         if (isSocketEventAllowed(socket.data.user.id)) {
@@ -178,10 +256,14 @@ export function createCollaboration({
         }
       });
 
-      socket.on('document:join', async (joinRequest, acknowledge) => {
+      socket.on('document:join', (joinRequest, acknowledge) => {
         if (typeof acknowledge !== 'function') {
           return;
         }
+        runExclusivelyForSocket(socket, () => joinDocument(socket, joinRequest, acknowledge));
+      });
+
+      async function joinDocument(socket, joinRequest, acknowledge) {
         try {
           const fileId = parseFileId(joinRequest?.fileId);
           const fileAccess = await findFileAccess(fileId, socket.data.user);
@@ -190,7 +272,11 @@ export function createCollaboration({
           }
           await leaveDocument(socket);
           const session = await loadSession(fileId);
-          const collaborator = session.addCollaborator(socket.id, parseUser(joinRequest?.user));
+          if (socket.disconnected) {
+            await unloadSessionIfIdle(session);
+            return;
+          }
+          const collaborator = session.addCollaborator(socket.id, parseUser(joinRequest?.user, socket.data.user));
           socket.data.session = session;
           socket.data.canEditDocument = fileAccess.canEdit;
           socket.join(toRoomName(fileId));
@@ -207,7 +293,7 @@ export function createCollaboration({
         } catch (error) {
           acknowledge({ error: error.message });
         }
-      });
+      }
 
       socket.on('document:operation', (operationRequest, acknowledge) => {
         if (typeof acknowledge !== 'function') {
@@ -384,6 +470,7 @@ export function createCollaboration({
 
   async function close() {
     const sessionPromises = [...sessionPromisesByFileId.values()];
+    stopAccessWatching();
     socketServer?.close();
     const sessionResults = await Promise.allSettled(sessionPromises);
     const loadedSessions = sessionResults

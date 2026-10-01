@@ -1,3 +1,4 @@
+import { notifyAccessChanged } from '../lib/accessChanges.js';
 import { pool } from '../db.js';
 import { decryptSecret, encryptSecret } from '../lib/encryption.js';
 import { findTotpTimeStep } from '../lib/totp.js';
@@ -71,11 +72,13 @@ export async function updateUserPassword(userId, passwordHash) {
     passwordHash,
     userId,
   ]);
+  notifyAccessChanged();
 }
 
 // Bloque ou débloque un compte ; renvoie false si le compte n'existe pas
 export async function setUserBlocked(userId, isBlocked) {
   const [updateResult] = await pool.execute('UPDATE users SET is_blocked = ? WHERE id = ?', [isBlocked, userId]);
+  notifyAccessChanged();
   return updateResult.affectedRows === 1;
 }
 
@@ -86,6 +89,7 @@ export async function revokeUserSessions(userId, currentTokenVersion) {
     userId,
     currentTokenVersion,
   ]);
+  notifyAccessChanged();
 }
 
 // Enregistre un secret 2FA chiffré, en attente de confirmation (la 2FA reste désactivée)

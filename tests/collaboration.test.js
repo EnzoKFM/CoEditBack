@@ -2,12 +2,16 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { io as createSocketClient } from 'socket.io-client';
 import { app } from '../src/app.js';
 import { createCollaboration } from '../src/collaboration/collaborationServer.js';
+import { pool } from '../src/db.js';
+import { notifyAccessChanged } from '../src/lib/accessChanges.js';
+import * as nodeService from '../src/services/nodeService.js';
 import { applyOperation, parseOperation, transformOperation } from '../src/collaboration/textOperation.js';
 import { createAuthenticatedAgent, createTestUser, deleteTestUser, loginAndGetSessionCookie } from './authHelper.js';
 import { closeDatabase, resetDatabase } from './databaseHelper.js';
 
 const STORE_DEBOUNCE_MS = 50;
 const STORE_MAX_DEBOUNCE_MS = 200;
+const SHARED_SOCKET_EVENT_LIMIT = 100000;
 const WAIT_FOR_TIMEOUT_MS = 3000;
 const WAIT_FOR_INTERVAL_MS = 20;
 const COLLABORATION_TEST_EMAIL = 'collaboration@coedit.test';
@@ -34,6 +38,7 @@ beforeAll(async () => {
   io = createCollaboration({
     storeDebounceMs: STORE_DEBOUNCE_MS,
     storeMaxDebounceMs: STORE_MAX_DEBOUNCE_MS,
+    socketEventLimit: SHARED_SOCKET_EVENT_LIMIT,
   }).attachToHttpServer(httpServer);
   authenticatedAgent = await createAuthenticatedAgent(COLLABORATION_TEST_EMAIL);
   sessionCookie = await loginAndGetSessionCookie(COLLABORATION_TEST_EMAIL);
@@ -311,7 +316,7 @@ describe('présence', () => {
     const presencePayload = await presenceReceivedByB;
 
     expect(presencePayload.clientId).toBe(socketA.id);
-    expect(presencePayload.user.name).toBe('Alice');
+    expect(presencePayload.user.name).toBe('Test Utilisateur');
     expect(presencePayload.selection).toEqual({ anchor: 3, head: 3 });
     expect(presencePayload.pointer).toEqual({ x: 10, y: 20 });
   });
@@ -337,7 +342,7 @@ describe('présence', () => {
     expect(joinAcknowledgementB.collaborators).toHaveLength(1);
     const alicesCollaborator = joinAcknowledgementB.collaborators[0];
     expect(alicesCollaborator.clientId).toBe(socketA.id);
-    expect(alicesCollaborator.user.name).toBe('Alice');
+    expect(alicesCollaborator.user.name).toBe('Test Utilisateur');
     expect(alicesCollaborator.selection).toEqual({
       anchor: 10 + insertedFragment.length,
       head: 10 + insertedFragment.length,
@@ -475,7 +480,7 @@ describe('appel audio', () => {
     expect(inviteAcknowledgement.callId).toBeDefined();
     expect(incomingCallPayload).toEqual({
       callId: inviteAcknowledgement.callId,
-      caller: { clientId: caller.clientId, user: { name: 'Alice', color: null } },
+      caller: { clientId: caller.clientId, user: { name: 'Test Utilisateur', color: null } },
     });
 
     const acceptedReceivedByCaller = waitForEvent(caller.socket, 'call:accepted');
@@ -752,7 +757,7 @@ describe('appel audio', () => {
     expect(inviteAcknowledgement).toEqual({ callId });
     expect(await incomingCallReceivedByCarla).toEqual({
       callId,
-      caller: { clientId: bob.clientId, user: { name: 'Bob', color: null } },
+      caller: { clientId: bob.clientId, user: { name: 'Test Utilisateur', color: null } },
     });
 
     const acceptedReceivedByAlice = waitForEvent(alice.socket, 'call:accepted');
@@ -764,8 +769,8 @@ describe('appel audio', () => {
     expect(acceptAcknowledgement.participants).toHaveLength(2);
     expect(acceptAcknowledgement.participants).toEqual(
       expect.arrayContaining([
-        { clientId: alice.clientId, user: { name: 'Alice', color: null } },
-        { clientId: bob.clientId, user: { name: 'Bob', color: null } },
+        { clientId: alice.clientId, user: { name: 'Test Utilisateur', color: null } },
+        { clientId: bob.clientId, user: { name: 'Test Utilisateur', color: null } },
       ]),
     );
 
@@ -1182,5 +1187,253 @@ describe('arrêt du serveur de collaboration', () => {
     const contentAfterClose = await authenticatedAgent.get(`/api/files/${createdFile.id}/content`);
     expect(contentBeforeClose.body.content).toBe('abc');
     expect(contentAfterClose.body.content).toBe('abcd');
+  });
+});
+
+describe('révocation des droits sur les sockets connectées', () => {
+  const REVOKED_USER_EMAIL = 'collaboration-revoked@coedit.test';
+
+  async function createRevokedUserFixture({ permission }) {
+    const revokedUserId = await createTestUser(REVOKED_USER_EMAIL);
+    const revokedUserCookie = await loginAndGetSessionCookie(REVOKED_USER_EMAIL);
+    const sharedFolder = (await createFolder('PartageRévoqué')).body;
+    const sharedFile = (await createFile('revoque.txt', sharedFolder.id, 'abc')).body;
+    await pool.execute('INSERT INTO folder_shares (folder_id, user_id, permission) VALUES (?, ?, ?)', [
+      sharedFolder.id,
+      revokedUserId,
+      permission,
+    ]);
+    return { revokedUserId, revokedUserCookie, sharedFolder, sharedFile };
+  }
+
+  function waitForDisconnection(socket) {
+    return new Promise((resolve) => socket.once('disconnect', resolve));
+  }
+
+  afterEach(async () => {
+    await deleteTestUser(REVOKED_USER_EMAIL);
+  });
+
+  it("déconnecte la socket d'un utilisateur bloqué dès que les droits changent", async () => {
+    const { revokedUserId, revokedUserCookie, sharedFile } = await createRevokedUserFixture({ permission: 'write' });
+    const revokedSocket = await connectClient(revokedUserCookie);
+    await joinDocument(revokedSocket, sharedFile.id, { name: 'Révoqué' });
+
+    const disconnection = waitForDisconnection(revokedSocket);
+    await pool.execute('UPDATE users SET is_blocked = 1 WHERE id = ?', [revokedUserId]);
+    notifyAccessChanged();
+
+    await disconnection;
+    expect(revokedSocket.connected).toBe(false);
+  });
+
+  it("déconnecte la socket dont le token a été révoqué (token_version changé)", async () => {
+    const { revokedUserId, revokedUserCookie } = await createRevokedUserFixture({ permission: 'write' });
+    const revokedSocket = await connectClient(revokedUserCookie);
+
+    const disconnection = waitForDisconnection(revokedSocket);
+    await pool.execute('UPDATE users SET token_version = token_version + 1 WHERE id = ?', [revokedUserId]);
+    notifyAccessChanged();
+
+    await disconnection;
+    expect(revokedSocket.connected).toBe(false);
+  });
+
+  it("fait quitter le document et prévient le client quand le partage est retiré", async () => {
+    const { revokedUserId, revokedUserCookie, sharedFolder, sharedFile } = await createRevokedUserFixture({
+      permission: 'write',
+    });
+    const revokedSocket = await connectClient(revokedUserCookie);
+    const joinAcknowledgement = await joinDocument(revokedSocket, sharedFile.id, { name: 'Révoqué' });
+
+    const revocation = waitForEvent(revokedSocket, 'document:revoked');
+    await pool.execute('DELETE FROM folder_shares WHERE folder_id = ? AND user_id = ?', [
+      sharedFolder.id,
+      revokedUserId,
+    ]);
+    notifyAccessChanged();
+
+    expect(await revocation).toEqual({ fileId: sharedFile.id });
+    const operationAcknowledgement = await revokedSocket.emitWithAck('document:operation', {
+      revision: joinAcknowledgement.revision,
+      operation: [{ retain: 3 }, { insert: 'd' }],
+    });
+    expect(operationAcknowledgement.error).toBe('Aucun document rejoint');
+    expect(revokedSocket.connected).toBe(true);
+  });
+
+  it("refuse les opérations et prévient le client quand le droit d'écriture est perdu", async () => {
+    const { revokedUserId, revokedUserCookie, sharedFolder, sharedFile } = await createRevokedUserFixture({
+      permission: 'write',
+    });
+    const revokedSocket = await connectClient(revokedUserCookie);
+    const joinAcknowledgement = await joinDocument(revokedSocket, sharedFile.id, { name: 'Révoqué' });
+
+    const permissionChange = waitForEvent(revokedSocket, 'document:permission');
+    await pool.execute('UPDATE folder_shares SET permission = ? WHERE folder_id = ? AND user_id = ?', [
+      'read',
+      sharedFolder.id,
+      revokedUserId,
+    ]);
+    notifyAccessChanged();
+
+    expect(await permissionChange).toEqual({ fileId: sharedFile.id, permission: 'read' });
+    const operationAcknowledgement = await revokedSocket.emitWithAck('document:operation', {
+      revision: joinAcknowledgement.revision,
+      operation: [{ retain: 3 }, { insert: 'd' }],
+    });
+    expect(operationAcknowledgement.error).toBe("Vous n'avez pas le droit de modifier ce document");
+  });
+
+  it("revalide périodiquement les sockets sans notification de changement", async () => {
+    const { revokedUserId, revokedUserCookie } = await createRevokedUserFixture({ permission: 'write' });
+    const { collaboration, port } = await startDedicatedCollaboration({
+      storeDebounceMs: STORE_DEBOUNCE_MS,
+      storeMaxDebounceMs: STORE_MAX_DEBOUNCE_MS,
+      accessCheckIntervalMs: 50,
+    });
+    try {
+      const revokedSocket = await connectClient(revokedUserCookie, port);
+
+      const disconnection = waitForDisconnection(revokedSocket);
+      await pool.execute('UPDATE users SET is_blocked = 1 WHERE id = ?', [revokedUserId]);
+
+      await disconnection;
+      expect(revokedSocket.connected).toBe(false);
+    } finally {
+      await collaboration.close();
+    }
+  });
+});
+
+describe('identité des collaborateurs', () => {
+  it("affiche le nom de l'utilisateur authentifié et ignore le nom envoyé par le client", async () => {
+    const createdFile = (await createFile('identite.txt', null, 'abc')).body;
+    const usurperSocket = await connectClient();
+    const observerSocket = await connectClient();
+    await joinDocument(observerSocket, createdFile.id, { name: 'Observateur' });
+
+    const presenceReceivedByObserver = waitForEvent(observerSocket, 'presence:update');
+    await joinDocument(usurperSocket, createdFile.id, { name: 'Administrateur imposteur' });
+    const presencePayload = await presenceReceivedByObserver;
+
+    expect(presencePayload.user.name).toBe('Test Utilisateur');
+  });
+
+  it.each([
+    ['#fff', '#fff'],
+    ['#A1b2C3', '#A1b2C3'],
+    ['red', null],
+    ['#12345', null],
+    ['#ff0000; background:url(x)', null],
+    [42, null],
+  ])('valide la couleur %s : %s', async (requestedColor, expectedColor) => {
+    const createdFile = (await createFile('couleur.txt', null, 'abc')).body;
+    const colorSocket = await connectClient();
+    const observerSocket = await connectClient();
+    await joinDocument(observerSocket, createdFile.id, { name: 'Observateur' });
+
+    const presenceReceivedByObserver = waitForEvent(observerSocket, 'presence:update');
+    await joinDocument(colorSocket, createdFile.id, { name: 'Alice', color: requestedColor });
+
+    expect((await presenceReceivedByObserver).user.color).toBe(expectedColor);
+  });
+});
+
+describe('sérialisation des joins', () => {
+  it("ne laisse pas de collaborateur orphelin quand deux joins partent en parallèle", async () => {
+    const firstFile = (await createFile('parallele-a.txt', null, 'abc')).body;
+    const secondFile = (await createFile('parallele-b.txt', null, 'abc')).body;
+    const parallelSocket = await connectClient();
+
+    await Promise.all([
+      joinDocument(parallelSocket, firstFile.id, { name: 'Alice' }),
+      joinDocument(parallelSocket, secondFile.id, { name: 'Alice' }),
+    ]);
+
+    const observerSocket = await connectClient();
+    const firstFileObservation = await joinDocument(observerSocket, firstFile.id, { name: 'Observateur' });
+    const secondFileObservation = await joinDocument(observerSocket, secondFile.id, { name: 'Observateur' });
+    expect(firstFileObservation.collaborators).toEqual([]);
+    expect(secondFileObservation.collaborators).toHaveLength(1);
+  });
+
+  it("n'ajoute pas de collaborateur quand la socket se déconnecte pendant le join", async () => {
+    const createdFile = (await createFile('deconnecte.txt', null, 'abc')).body;
+    const leavingSocket = await connectClient();
+    leavingSocket.emit('document:join', { fileId: createdFile.id, user: { name: 'Alice' } }, () => {});
+    leavingSocket.disconnect();
+
+    const observerSocket = await connectClient();
+    await vi.waitFor(
+      async () => {
+        const observation = await joinDocument(observerSocket, createdFile.id, { name: 'Observateur' });
+        expect(observation.collaborators).toEqual([]);
+      },
+      { timeout: WAIT_FOR_TIMEOUT_MS, interval: WAIT_FOR_INTERVAL_MS },
+    );
+    const lateObservation = await joinDocument(observerSocket, createdFile.id, { name: 'Observateur' });
+    expect(lateObservation.collaborators).toEqual([]);
+  });
+});
+
+describe('limite de connexions par utilisateur', () => {
+  it("refuse au handshake une connexion au-delà de maxSocketsPerUser", async () => {
+    const { collaboration, port } = await startDedicatedCollaboration({
+      storeDebounceMs: STORE_DEBOUNCE_MS,
+      storeMaxDebounceMs: STORE_MAX_DEBOUNCE_MS,
+      maxSocketsPerUser: 2,
+    });
+    try {
+      await connectClient(sessionCookie, port);
+      await connectClient(sessionCookie, port);
+
+      await expect(connectClient(sessionCookie, port)).rejects.toThrow('Trop de connexions simultanées');
+      await expect(connectClient(guestSessionCookie, port)).resolves.toBeDefined();
+    } finally {
+      await collaboration.close();
+    }
+  });
+});
+
+describe('échec de sauvegarde', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("garde la session en mémoire et retente la sauvegarde après un échec, sans perdre les modifications", async () => {
+    const createdFile = (await createFile('echec.txt', null, 'abc')).body;
+    const storeSpy = vi.spyOn(nodeService, 'storeFileDocument').mockRejectedValue(new Error('base indisponible'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const editorSocket = await connectClient();
+    const joinAcknowledgement = await joinDocument(editorSocket, createdFile.id, { name: 'Alice' });
+    await editorSocket.emitWithAck('document:operation', {
+      revision: joinAcknowledgement.revision,
+      operation: [{ retain: 3 }, { insert: 'd' }],
+    });
+    await vi.waitFor(() => expect(storeSpy).toHaveBeenCalledTimes(1), {
+      timeout: WAIT_FOR_TIMEOUT_MS,
+      interval: WAIT_FOR_INTERVAL_MS,
+    });
+
+    editorSocket.emit('document:leave');
+    await editorSocket.emitWithAck('chat:history');
+    await vi.waitFor(() => expect(storeSpy.mock.calls.length).toBeGreaterThanOrEqual(2), {
+      timeout: WAIT_FOR_TIMEOUT_MS,
+      interval: WAIT_FOR_INTERVAL_MS,
+    });
+    await storeSpy.mock.results[1].value.catch(() => {});
+    storeSpy.mockRestore();
+
+    const returningSocket = await connectClient();
+    const returningJoin = await joinDocument(returningSocket, createdFile.id, { name: 'Bob' });
+    expect(returningJoin.content).toBe('abcd');
+    await vi.waitFor(
+      async () => {
+        const contentResponse = await authenticatedAgent.get(`/api/files/${createdFile.id}/content`);
+        expect(contentResponse.body.content).toBe('abcd');
+      },
+      { timeout: WAIT_FOR_TIMEOUT_MS, interval: WAIT_FOR_INTERVAL_MS },
+    );
   });
 });

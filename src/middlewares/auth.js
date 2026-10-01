@@ -45,15 +45,20 @@ export function requireAdmin(request, response, next) {
   next();
 }
 
-// Équivalent de requireAuth pour Socket.IO : vérifié une fois, à l'ouverture de la connexion.
+export async function findSocketUser(socket) {
+  const user = await findSessionUser(socket.request.cookies?.[AUTH_COOKIE]);
+  return user ? toUserResponse(user) : null;
+}
+
+// Équivalent de requireAuth pour Socket.IO : vérifié à l'ouverture de la connexion, puis revalidé par collaborationServer.js.
 // Les cookies de la requête d'ouverture sont lus par cookie-parser (io.engine.use dans collaborationServer.js).
 export async function authenticateSocket(socket, next) {
   try {
-    const user = await findSessionUser(socket.request.cookies?.[AUTH_COOKIE]);
+    const user = await findSocketUser(socket);
     if (!user) {
       return next(new Error('Non authentifié'));
     }
-    socket.data.user = toUserResponse(user);
+    socket.data.user = user;
     next();
   } catch (error) {
     next(error);
