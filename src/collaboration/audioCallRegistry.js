@@ -83,6 +83,20 @@ export class AudioCallRegistry {
     call.cameraClientIds.add(clientId);
   }
 
+  findCallForJoinRequest(callId, requesterClientId) {
+    if (this.callIdsByClientId.has(requesterClientId)) {
+      throw new Error('Vous êtes déjà en appel');
+    }
+    const call = this.callsById.get(callId);
+    if (!call || call.participantClientIds.size < 2) {
+      throw new Error('Appel introuvable');
+    }
+    if (countCallMembers(call) >= MAX_CALL_MEMBERS) {
+      throw new Error(`L'appel est complet (${MAX_CALL_MEMBERS} personnes maximum)`);
+    }
+    return call;
+  }
+
   isInAcceptedCallWith(clientId, peerClientId) {
     const call = this.findCallOfClient(clientId);
     return (
