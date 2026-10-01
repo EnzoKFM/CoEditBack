@@ -1,8 +1,13 @@
 import { pool } from '../db.js';
 import { HttpError } from '../errors/HttpError.js';
+import { notifyAccessChanged } from '../lib/accessChanges.js';
 
 const ROOT_PARENT_KEY = 0;
 const ROOT_OWNER_KEY_OUTSIDE_ROOT = 0;
+const READ_COMMITTED_ISOLATION_LEVEL = 'READ COMMITTED';
+const DEFAULT_USER_STORAGE_QUOTA_BYTES = 500 * 1024 * 1024;
+
+export const MAX_FOLDER_DEPTH = 100;
 
 const PERMISSION_RANKS = { none: 0, read: 1, write: 2, delete: 3, owner: 4 };
 
@@ -29,10 +34,15 @@ function toAuthorsResponse(nodeRow) {
   };
 }
 
-function toNodeResponse(nodeRow) {
+function getUserStorageQuotaBytes() {
+  const configuredQuotaBytes = Number(process.env.USER_STORAGE_QUOTA_BYTES);
+  return configuredQuotaBytes > 0 ? configuredQuotaBytes : DEFAULT_USER_STORAGE_QUOTA_BYTES;
+}
+
+function toNodeResponse(nodeRow, { isParentVisible = true } = {}) {
   return {
     id: nodeRow.id,
-    parentId: nodeRow.parent_id,
+    parentId: isParentVisible ? nodeRow.parent_id : null,
     type: nodeRow.type,
     name: nodeRow.name,
     ownerId: nodeRow.owner_id,
@@ -62,9 +72,12 @@ function toChildResponse(childRow) {
   return childResponse;
 }
 
-async function withTransaction(transactionCallback) {
+async function withTransaction(transactionCallback, { isolationLevel } = {}) {
   const connection = await pool.getConnection();
   try {
+    if (isolationLevel) {
+      await connection.query(`SET TRANSACTION ISOLATION LEVEL ${isolationLevel}`);
+    }
     await connection.beginTransaction();
     const transactionResult = await transactionCallback(connection);
     await connection.commit();
@@ -192,6 +205,30 @@ async function getBreadcrumb(folderId, connection = pool) {
   return ancestorRows.map((ancestorRow) => ({ id: ancestorRow.id, name: ancestorRow.name }));
 }
 
+async function lockOwnerTree(ownerId, connection) {
+  await connection.query('SELECT id FROM users WHERE id = ? FOR UPDATE', [ownerId]);
+}
+
+async function assertDepthWithinLimit(parentId, subtreeHeight, connection) {
+  const parentDepth = parentId === null ? 0 : (await getBreadcrumb(parentId, connection)).length;
+  if (parentDepth + 1 + subtreeHeight > MAX_FOLDER_DEPTH) {
+    throw new HttpError(400, `La profondeur maximale de l'arborescence (${MAX_FOLDER_DEPTH} niveaux) est dépassée`);
+  }
+}
+
+async function assertStorageQuotaRespected(ownerId, addedBytes, connection) {
+  const [usageRows] = await connection.query(
+    `SELECT COALESCE(SUM(file_binary.size), 0) AS used_bytes
+     FROM file_binaries AS file_binary
+     JOIN nodes AS node ON node.id = file_binary.node_id
+     WHERE node.owner_id = ?`,
+    [ownerId],
+  );
+  if (Number(usageRows[0].used_bytes) + addedBytes > getUserStorageQuotaBytes()) {
+    throw new HttpError(413, 'Quota de stockage dépassé pour ce propriétaire');
+  }
+}
+
 async function getDescendantIdsByDepth(nodeId, connection) {
   const [descendantRows] = await connection.query(
     `WITH RECURSIVE descendants AS (
@@ -257,8 +294,11 @@ export async function listFolderChildren(folderId, user) {
 }
 
 export async function getNode(nodeId, user) {
-  const { nodeRow, permissionRank } = await getAccessibleNode(nodeId, user);
-  return { ...toNodeResponse(nodeRow), permission: toPermissionName(permissionRank) };
+  const { nodeRow, permissionRank, shareRootDepth } = await getAccessibleNode(nodeId, user);
+  return {
+    ...toNodeResponse(nodeRow, { isParentVisible: shareRootDepth !== 0 }),
+    permission: toPermissionName(permissionRank),
+  };
 }
 
 export async function createNode({ parentId, type, name, content, binaryFile, user }) {
@@ -267,6 +307,12 @@ export async function createNode({ parentId, type, name, content, binaryFile, us
     if (parentId !== null) {
       const parentRow = await getWritableParentFolder(parentId, user, connection);
       ownerId = parentRow.owner_id;
+    }
+
+    await lockOwnerTree(ownerId, connection);
+    await assertDepthWithinLimit(parentId, 0, connection);
+    if (binaryFile) {
+      await assertStorageQuotaRespected(ownerId, binaryFile.data.length, connection);
     }
 
     const [insertResult] = await connection.query(
@@ -289,19 +335,21 @@ export async function createNode({ parentId, type, name, content, binaryFile, us
     }
 
     return toNodeResponse(await findNodeById(insertResult.insertId, connection));
-  });
+  }, { isolationLevel: READ_COMMITTED_ISOLATION_LEVEL });
 }
 
 export async function updateNode(nodeId, user, { name, parentId, isMoveRequested }) {
-  return withTransaction(async (connection) => {
+  const updatedNodeResponse = await withTransaction(async (connection) => {
     const { nodeRow, itemPermissionRank } = await getAccessibleNode(nodeId, user, connection);
     assertPermission(itemPermissionRank, isMoveRequested ? PERMISSION_RANKS.delete : PERMISSION_RANKS.write);
     const updatedName = name ?? nodeRow.name;
     let updatedParentId = nodeRow.parent_id;
 
     if (isMoveRequested) {
+      await lockOwnerTree(nodeRow.owner_id, connection);
+      const rootOwnerId = user.role === 'admin' ? nodeRow.owner_id : user.id;
       const destinationOwnerId =
-        parentId === null ? user.id : (await getWritableParentFolder(parentId, user, connection)).owner_id;
+        parentId === null ? rootOwnerId : (await getWritableParentFolder(parentId, user, connection)).owner_id;
       if (destinationOwnerId !== nodeRow.owner_id) {
         throw new HttpError(400, "Impossible de déplacer un élément vers l'espace d'un autre utilisateur");
       }
@@ -312,6 +360,8 @@ export async function updateNode(nodeId, user, { name, parentId, isMoveRequested
           throw new HttpError(400, 'Impossible de déplacer un dossier dans lui-même ou dans un de ses sous-dossiers');
         }
       }
+      const movedSubtreeLevels = await getDescendantIdsByDepth(nodeId, connection);
+      await assertDepthWithinLimit(parentId, movedSubtreeLevels.length - 1, connection);
       updatedParentId = parentId;
     }
 
@@ -320,7 +370,11 @@ export async function updateNode(nodeId, user, { name, parentId, isMoveRequested
       [updatedName, updatedParentId, user.id, nodeId],
     );
     return toNodeResponse(await findNodeById(nodeId, connection));
-  });
+  }, { isolationLevel: READ_COMMITTED_ISOLATION_LEVEL });
+  if (isMoveRequested) {
+    notifyAccessChanged();
+  }
+  return updatedNodeResponse;
 }
 
 export async function deleteNode(nodeId, user) {
@@ -332,6 +386,7 @@ export async function deleteNode(nodeId, user) {
       await connection.query('DELETE FROM nodes WHERE id IN (?)', [idsAtDepth]);
     }
   });
+  notifyAccessChanged();
 }
 
 export async function getFileContent(fileId, user) {
@@ -387,6 +442,10 @@ export async function replaceBinaryFile(fileId, user, { mimeType, data }) {
       throw new HttpError(400, "Cet élément n'est pas un fichier");
     }
     assertPermission(permissionRank, PERMISSION_RANKS.write);
+    await lockOwnerTree(nodeRow.owner_id, connection);
+    const [currentSizeRows] = await connection.query('SELECT size FROM file_binaries WHERE node_id = ?', [fileId]);
+    const currentSizeBytes = currentSizeRows[0] ? Number(currentSizeRows[0].size) : 0;
+    await assertStorageQuotaRespected(nodeRow.owner_id, data.length - currentSizeBytes, connection);
 
     const [updateResult] = await connection.query(
       `UPDATE file_binaries AS file_binary
@@ -404,7 +463,7 @@ export async function replaceBinaryFile(fileId, user, { mimeType, data }) {
       throw new HttpError(400, 'Ce fichier est un document texte : son contenu se modifie en temps réel');
     }
     return toNodeResponse(await findNodeById(fileId, connection));
-  });
+  }, { isolationLevel: READ_COMMITTED_ISOLATION_LEVEL });
 }
 
 export async function findFileDocument(fileId) {

@@ -12,8 +12,8 @@ docker compose up -d --build
 ```
 
 - API : http://localhost:3000 (`GET /api/health`).
-- MySQL est exposé sur le port `DB_EXPOSED_PORT` (3306 par défaut). Le schéma `sql/schema.sql` est appliqué automatiquement au premier démarrage du volume.
-- phpMyAdmin : http://localhost:8080 (`PHPMYADMIN_PORT`), pour consulter et modifier la base. Se connecter avec l'utilisateur `root` et le mot de passe `DB_PASSWORD` du `.env`. Il n'est accessible que depuis la machine qui fait tourner Docker (ni depuis le réseau local, ni via ngrok) : il donne un accès complet à la base.
+- MySQL est exposé sur `127.0.0.1` uniquement, port `DB_EXPOSED_PORT` (3306 par défaut). Le schéma `sql/schema.sql` est appliqué automatiquement au premier démarrage du volume.
+- phpMyAdmin (profil `dev`, lancé avec `docker compose --profile dev up -d`) : http://localhost:8080 (`PHPMYADMIN_PORT`), pour consulter et modifier la base. Se connecter avec l'utilisateur `root` et le mot de passe `DB_PASSWORD` du `.env`. Il n'est accessible que depuis la machine qui fait tourner Docker (ni depuis le réseau local, ni via ngrok) : il donne un accès complet à la base.
 - `src/`, `sql/` et `tests/` sont montés dans le conteneur ; `nodemon` recharge l'API à chaque modification.
 
 Réappliquer le schéma (idempotent) : `docker compose exec back npm run db:init`. **À faire si le volume MySQL existait avant l'ajout de la table `users`** : le schéma n'est appliqué automatiquement qu'à la création du volume.
@@ -35,9 +35,9 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 | Variable | Rôle |
 |---|---|
 | `PORT` | Port de l'API (3000) |
-| `CLIENT_URL` | Origine autorisée par CORS (front) |
+| `CLIENT_URL` | Origine autorisée par CORS (front), **obligatoire** : origine http(s) sans chemin ni slash final, sinon l'API refuse de démarrer |
 | `NODE_ENV` | `development` en local ; `production` ajoute l'attribut `Secure` aux cookies (HTTPS obligatoire) |
-| `TRUST_PROXY` | Nombre de reverse proxies devant l'API (ex. `1` derrière Traefik ou Nginx, `2` pour un test à plusieurs via ngrok + le proxy de Vite, voir le README du front), vide sinon. Sans lui derrière un proxy, tous les visiteurs partagent la même IP pour la limitation des tentatives. Ne pas le renseigner sans proxy : un client pourrait alors falsifier son IP via l'en-tête `X-Forwarded-For` |
+| `TRUST_PROXY` | Nombre de reverse proxies devant l'API, entier supérieur ou égal à 0 (l'API refuse de démarrer sinon ; ex. `1` derrière Traefik ou Nginx, `2` pour un test à plusieurs via ngrok + le proxy de Vite, voir le README du front), vide sinon. Sans lui derrière un proxy, tous les visiteurs partagent la même IP pour la limitation des tentatives. Ne pas le renseigner sans proxy : un client pourrait alors falsifier son IP via l'en-tête `X-Forwarded-For` |
 | `JWT_SECRET` | Clé de signature des sessions, **obligatoire, au moins 32 caractères**, propre à chaque environnement |
 | `TOTP_ENCRYPTION_KEY` | Clé de chiffrement des secrets 2FA, **obligatoire, 64 caractères hexadécimaux**. La changer rend inutilisables les 2FA déjà activées |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | Premier administrateur, créé au démarrage s'il n'en existe aucun ; ignorées ensuite |
@@ -47,6 +47,7 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 | `DB_TEST_NAME` | Base des tests |
 | `DB_EXPOSED_PORT` | Port MySQL publié sur l'hôte |
 | `PHPMYADMIN_PORT` | Port de phpMyAdmin sur l'hôte (8080 par défaut) |
+| `USER_STORAGE_QUOTA_BYTES` | Quota de fichiers binaires par propriétaire, en octets (500 Mo par défaut) |
 
 ## Modèle de données
 
@@ -58,7 +59,7 @@ Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_te
 
 ## API
 
-Toutes les erreurs renvoient `{ "error": "message" }` : 400 (requête invalide), 401 (non authentifié), 403 (accès refusé), 404 (élément introuvable), 409 (conflit de nom ou de version), 413 (corps JSON > 5 Mo, fichier binaire > 20 Mo), 429 (trop de tentatives).
+Toutes les erreurs renvoient `{ "error": "message" }` : 400 (requête invalide), 401 (non authentifié), 403 (accès refusé), 404 (élément introuvable), 409 (conflit de nom ou de version), 413 (corps JSON > 5 Mo, fichier binaire > 20 Mo, quota de stockage dépassé), 429 (trop de tentatives).
 
 ### Authentification
 
@@ -78,8 +79,8 @@ Limitation des tentatives (seuls les échecs comptent, fenêtre de 15 minutes, p
 | Route | Limite |
 |---|---|
 | `/login` | 20 échecs par IP, et 10 échecs par compte (email), quelle que soit l'IP |
-| `/login/2fa` | 10 échecs par IP |
-| `/2fa/setup`, `/2fa/disable`, `PATCH /api/users/me`, `/api/users/me/password` | 10 échecs par utilisateur connecté |
+| `/login/2fa` | 10 échecs par IP, et 10 échecs par compte (identifiant du cookie `pending_2fa`), quelle que soit l'IP |
+| `/2fa/setup`, `/2fa/enable`, `/2fa/disable`, `PATCH /api/users/me`, `/api/users/me/password` | 10 échecs par utilisateur connecté |
 
 La limite par compte bloque aussi son propriétaire pendant 15 minutes : c'est la contrepartie de la protection contre une attaque répartie sur plusieurs IP. En développement, redémarrer l'API (`rs` dans nodemon) remet les compteurs à zéro.
 
@@ -191,7 +192,9 @@ Le dossier partagé lui-même ne peut être renommé, déplacé ou supprimé que
 
 ### Déplacement
 
-`parentId: null` déplace l'élément à la racine. Un dossier ne peut pas être déplacé dans lui-même ni dans un de ses sous-dossiers (400).
+`parentId: null` déplace l'élément à la racine (celle de son propriétaire quand c'est un administrateur qui déplace l'élément d'autrui). Un dossier ne peut pas être déplacé dans lui-même ni dans un de ses sous-dossiers (400). Les déplacements d'un même arbre sont sérialisés, si bien que deux déplacements croisés simultanés ne peuvent pas créer de cycle.
+
+L'arborescence est limitée à 100 niveaux, à la création comme au déplacement (400 au-delà). Un nom ne peut être ni `.` ni `..`, ni contenir `/`, des caractères de contrôle ou des caractères de contrôle bidirectionnel (qui permettraient de déguiser une extension).
 
 ### Lecture du contenu
 
@@ -199,7 +202,7 @@ Le dossier partagé lui-même ne peut être renommé, déplacé ou supprimé que
 
 ### Fichiers binaires
 
-Les PDF, images et autres fichiers non co-édités s'envoient en `multipart/form-data` sur `POST /api/files` : champ `file` (obligatoire, 20 Mo maximum), `parentId` (à omettre pour la racine) et `name` (nom d'origine du fichier par défaut). Le type MIME déclaré est celui de la partie `file` ; s'il est absent ou illisible, c'est `text/plain`, le défaut du multipart (RFC 7578). Le serveur contrôle ensuite le contenu réel grâce à sa signature (bibliothèque `file-type`) : si le type reconnu diffère du type déclaré, ou si le contenu ne porte pas la signature attendue d'un type qui en a une (un script renommé en `.png`, par exemple), l'envoi est refusé (400). Un type reconnu est enregistré à la place d'un `application/octet-stream` déclaré ; un contenu sans signature (texte, CSV…) garde son type déclaré. La requête accepte au plus deux champs texte d'1 Ko, et chaque utilisateur est limité à 60 envois ou remplacements par quart d'heure (429 au-delà).
+Les PDF, images et autres fichiers non co-édités s'envoient en `multipart/form-data` sur `POST /api/files` : champ `file` (obligatoire, 20 Mo maximum), `parentId` (à omettre pour la racine) et `name` (nom d'origine du fichier par défaut). Le type MIME déclaré est celui de la partie `file` ; s'il est absent ou illisible, c'est `text/plain`, le défaut du multipart (RFC 7578). Le serveur contrôle ensuite le contenu réel grâce à sa signature (bibliothèque `file-type`) : si le type reconnu diffère du type déclaré, ou si le contenu ne porte pas la signature attendue d'un type qui en a une (un script renommé en `.png`, par exemple), l'envoi est refusé (400). Un type reconnu est enregistré à la place d'un `application/octet-stream` déclaré ; un contenu sans signature garde son type déclaré seulement si c'est `text/plain`, `text/csv`, `text/markdown` ou `application/json`, et est enregistré en `application/octet-stream` sinon (un HTML ou un SVG ne peut donc pas être resservi comme tel). La requête accepte au plus deux champs texte d'1 Ko, et chaque utilisateur est limité à 60 envois ou remplacements par quart d'heure (429 au-delà). Le total des fichiers binaires d'un propriétaire est plafonné par `USER_STORAGE_QUOTA_BYTES` (413 au-delà), y compris pour les fichiers envoyés par ses invités.
 
 `GET /api/files/:fileId/binary` renvoie les octets avec leur `Content-Type` et un `Content-Disposition: attachment` ; côté front, le charger avec `fetch` (`credentials: 'include'`) puis l'afficher via `URL.createObjectURL`. `PUT /api/files/:fileId/binary` remplace le contenu et le type MIME sans changer le nom (renommer avec `PATCH /api/nodes/:nodeId`). Un fichier binaire ne peut pas être rejoint en collaboration, et un document texte ne peut pas être remplacé par cette route.
 
@@ -207,7 +210,7 @@ Les PDF, images et autres fichiers non co-édités s'envoient en `multipart/form
 
 La synchronisation repose sur une transformation opérationnelle (OT) écrite pour le projet, sans Yjs. Le transport est [Socket.IO](https://socket.io), sur le même port que l'API (`http://localhost:3000`, chemin par défaut `/socket.io`). Le serveur fait autorité : il ordonne les opérations, les transforme, les applique, puis les diffuse.
 
-La connexion exige une session : le serveur lit le cookie `token` à l'ouverture et la refuse (`connect_error` « Non authentifié ») s'il est absent, invalide ou révoqué, ou si le compte est bloqué. Le front, qui n'est pas sur la même origine que l'API, doit ouvrir le socket avec `withCredentials: true` pour que le navigateur envoie le cookie.
+La connexion exige une session : le serveur lit le cookie `token` à l'ouverture et la refuse (`connect_error` « Non authentifié ») s'il est absent, invalide ou révoqué, ou si le compte est bloqué. Le front, qui n'est pas sur la même origine que l'API, doit ouvrir le socket avec `withCredentials: true` pour que le navigateur envoie le cookie. Un utilisateur ne peut avoir que 20 sockets simultanées : au-delà, la connexion est refusée (`connect_error` « Trop de connexions simultanées »).
 
 ### Opérations
 
@@ -228,12 +231,15 @@ Une opération décrit tout le document, dans l'ordre, sous forme d'une liste de
 | client → serveur | `presence:update` | `{ selection: { anchor, head } \| null, pointer: { x, y } \| null }` |
 | client → serveur | `document:leave` | |
 | serveur → clients | `document:operation` | `{ clientId, revision, operation }` |
+| serveur → client | `document:revoked` | `{ fileId }` : l'accès au document a été retiré, la socket l'a quitté |
+| serveur → client | `document:permission` | `{ fileId, permission }` : le droit d'écriture a changé |
 | serveur → clients | `presence:update` | `{ clientId, user, selection, pointer }` |
 | serveur → clients | `presence:leave` | `{ clientId }` |
 
 - `revision` est la révision du document sur laquelle l'opération a été écrite. Le serveur la transforme contre les opérations appliquées depuis, puis renvoie la nouvelle révision dans l'accusé.
 - Un fichier inexistant ou inaccessible, un dossier ou un identifiant invalide est refusé à `document:join`.
-- `document:operation` est refusée si `permission` vaut `read`. Les droits sont évalués à `document:join` : une modification ou un retrait de partage prend effet au prochain `document:join`.
+- `document:operation` est refusée si `permission` vaut `read`. Le nom affiché des collaborateurs est celui de l'utilisateur connecté (le `name` envoyé à `document:join` est ignoré) et `color` doit être au format `#rgb` ou `#rrggbb`, sinon `null`.
+- **Les droits sont revalidés en continu** : à chaque changement de droits (blocage, changement de mot de passe, déconnexion des sessions, partage retiré ou modifié, nœud supprimé ou déplacé) puis toutes les 60 s (expiration du token comprise). Un utilisateur devenu invalide est déconnecté ; un document devenu inaccessible est quitté (`document:revoked`) ; une perte du droit d'écriture refuse les opérations suivantes (`document:permission`).
 - `isResyncRequired: true` signale une révision antérieure au chargement du document en mémoire (après une reconnexion par exemple) : il faut rejoindre à nouveau le document.
 - La présence n'est pas stockée. Le serveur transforme toutefois les sélections qu'il connaît à chaque opération, pour qu'un nouvel arrivant les reçoive à jour dans `collaborators`.
 
@@ -246,10 +252,11 @@ Une opération décrit tout le document, dans l'ordre, sous forme d'une liste de
 
 ### Sauvegarde
 
-Le serveur sauvegarde lui-même : 2 s après la dernière opération, au plus tard toutes les 10 s pendant une frappe continue, et tout de suite quand le dernier éditeur quitte le document. Le front n'a rien à enregistrer.
+Le serveur sauvegarde lui-même : 2 s après la dernière opération, au plus tard toutes les 10 s pendant une frappe continue, et tout de suite quand le dernier éditeur quitte le document. En cas d'échec, la révision n'est pas considérée comme sauvegardée : la sauvegarde est retentée et le document reste en mémoire tant que sa dernière révision n'est pas enregistrée. Le front n'a rien à enregistrer.
 
 ### Limites
 
+- Une opération compte au plus 1 000 composants.
 - Un document ne peut pas dépasser 5 000 000 de caractères : l'opération qui le ferait dépasser est refusée (`{ error }`).
 - Le serveur garde en mémoire les 1 000 dernières opérations (1 000 000 de caractères au plus) de chaque document ; une opération écrite sur une révision plus ancienne reçoit `isResyncRequired: true`.
 - 100 messages par seconde et par utilisateur, tous événements confondus ; au-delà, le message est ignoré et son accusé reçoit `{ error: 'Trop de messages envoyés : réessayez dans un instant' }`.

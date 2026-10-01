@@ -5,7 +5,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD doit être défini dans .env}
       MYSQL_DATABASE: ${DB_NAME:-coedit}
     ports:
-      - "${DB_EXPOSED_PORT:-3306}:3306"
+      - "127.0.0.1:${DB_EXPOSED_PORT:-3306}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
@@ -23,8 +23,8 @@ services:
       CLIENT_URL: ${CLIENT_URL:-http://localhost:5173}
       NODE_ENV: ${NODE_ENV:-development}
       TRUST_PROXY: ${TRUST_PROXY:-}
-      JWT_SECRET: ${JWT_SECRET}
-      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET doit être défini dans .env}
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:?TOTP_ENCRYPTION_KEY doit être défini dans .env}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       DB_HOST: mysql
@@ -33,6 +33,7 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD doit être défini dans .env}
       DB_NAME: ${DB_NAME:-coedit}
       DB_TEST_NAME: ${DB_TEST_NAME:-coedit_test}
+      USER_STORAGE_QUOTA_BYTES: ${USER_STORAGE_QUOTA_BYTES:-}
     ports:
       - "${PORT:-3000}:3000"
     volumes:
@@ -46,6 +47,7 @@ services:
 
   phpmyadmin:
     image: phpmyadmin:5.2
+    profiles: ["dev"]
     environment:
       PMA_HOST: mysql
       PMA_PORT: 3306

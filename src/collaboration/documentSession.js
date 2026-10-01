@@ -23,11 +23,14 @@ export class DocumentSession {
     maxHistoryLength,
     maxHistorySize,
     maxDocumentLength,
+    onStored = () => {},
   }) {
     this.fileId = fileId;
     this.content = content;
     this.revision = revision;
     this.queuedStoreRevision = revision;
+    this.storedRevision = revision;
+    this.onStored = onStored;
     this.historyStartRevision = revision;
     this.operationHistory = [];
     this.historySize = 0;
@@ -166,6 +169,10 @@ export class DocumentSession {
     this.storeTimer = setTimeout(() => this.store(), storeDelay);
   }
 
+  hasUnstoredChanges() {
+    return this.storedRevision !== this.revision;
+  }
+
   store() {
     clearTimeout(this.storeTimer);
     this.storeTimer = null;
@@ -180,10 +187,24 @@ export class DocumentSession {
 
     this.queuedStoreRevision = revisionToStore;
     this.storeQueue = this.storeQueue
-      .then(() =>
-        storeFileDocument(this.fileId, { content: contentToStore, revision: revisionToStore, updatedBy: editorToStore }),
-      )
-      .catch((error) => console.error(`Sauvegarde du fichier ${this.fileId} impossible :`, error.message));
+      .then(async () => {
+        await storeFileDocument(this.fileId, {
+          content: contentToStore,
+          revision: revisionToStore,
+          updatedBy: editorToStore,
+        });
+        this.storedRevision = Math.max(this.storedRevision, revisionToStore);
+        this.onStored();
+      })
+      .catch((error) => {
+        console.error(`Sauvegarde du fichier ${this.fileId} impossible :`, error.message);
+        if (this.queuedStoreRevision === revisionToStore) {
+          this.queuedStoreRevision = this.storedRevision;
+        }
+        if (this.hasUnstoredChanges()) {
+          this.scheduleStore();
+        }
+      });
     return this.storeQueue;
   }
 }

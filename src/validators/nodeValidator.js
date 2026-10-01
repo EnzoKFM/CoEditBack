@@ -3,6 +3,9 @@ import { HttpError } from '../errors/HttpError.js';
 
 const NODE_TYPES = ['folder', 'file'];
 const NAME_MAX_LENGTH = 255;
+const FORBIDDEN_NAME_CHARACTERS_PATTERN = /[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+const RESERVED_NAMES = ['.', '..'];
+const SAFE_DECLARED_MIME_TYPES = new Set(['text/plain', 'text/csv', 'text/markdown', 'application/json']);
 const POSITIVE_INTEGER_PATTERN = /^[1-9]\d*$/;
 const MIME_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/;
 const MIME_TYPE_MAX_LENGTH = 255;
@@ -36,6 +39,12 @@ export function validateNodeName(rawName) {
   }
   if (trimmedName.includes('/')) {
     throw new HttpError(400, 'Le nom ne doit pas contenir de « / »');
+  }
+  if (FORBIDDEN_NAME_CHARACTERS_PATTERN.test(trimmedName)) {
+    throw new HttpError(400, 'Le nom ne doit pas contenir de caractères de contrôle');
+  }
+  if (RESERVED_NAMES.includes(trimmedName)) {
+    throw new HttpError(400, 'Ce nom est réservé');
   }
   return trimmedName;
 }
@@ -84,9 +93,11 @@ export async function parseUploadedBinaryFile(rawUploadedFile) {
     throw new HttpError(400, `Le contenu du fichier ne correspond pas au type déclaré (${declaredMimeType})`);
   }
 
+  const storableDeclaredMimeType = SAFE_DECLARED_MIME_TYPES.has(declaredMimeType) ? declaredMimeType : DEFAULT_MIME_TYPE;
+
   return {
     originalName: uploadedFile.originalname,
-    mimeType: detectedFileType?.mime ?? declaredMimeType,
+    mimeType: detectedFileType?.mime ?? storableDeclaredMimeType,
     data: uploadedFile.buffer,
   };
 }

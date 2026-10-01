@@ -1,4 +1,5 @@
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { verifyPending2faToken, PENDING_2FA_COOKIE } from '../lib/pending2faCookie.js';
 
 // Limiteurs contre le bruteforce. Seuls les échecs sont comptés (skipSuccessfulRequests),
 // et chaque route a son propre compteur : un échec sur l'une n'en bloque pas une autre.
@@ -32,11 +33,25 @@ const loginAccountLimiter = createFailureLimiter(
 export const loginLimiters = [loginIpLimiter, loginAccountLimiter];
 
 // Code 2FA de connexion : sans limite, on pourrait essayer le million de codes possibles
-export const twoFactorLoginLimiter = createFailureLimiter(10);
+const twoFactorLoginIpLimiter = createFailureLimiter(10);
+
+function buildPending2faAccountKey(request) {
+  try {
+    return `user:${verifyPending2faToken(request.cookies?.[PENDING_2FA_COOKIE]).userId}`;
+  } catch {
+    return ipKeyGenerator(request.ip);
+  }
+}
+
+const twoFactorLoginAccountLimiter = createFailureLimiter(10, buildPending2faAccountKey);
+
+export const twoFactorLoginLimiters = [twoFactorLoginIpLimiter, twoFactorLoginAccountLimiter];
 
 // Routes du compte connecté qui vérifient le mot de passe (activation et désactivation de la 2FA),
 // comptées par utilisateur : une session volée ne permet pas de deviner le mot de passe
 export const passwordCheckLimiter = createFailureLimiter(10, (request) => `user:${request.user.id}`);
+
+export const twoFactorEnableLimiter = createFailureLimiter(10, (request) => `user:${request.user.id}`);
 
 export const BINARY_FILE_UPLOAD_LIMIT = 60;
 

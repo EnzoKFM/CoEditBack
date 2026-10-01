@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   InvalidOperationError,
+  MAX_OPERATION_COMPONENTS,
   applyOperation,
   parseOperation,
   transformIndex,
@@ -8,6 +9,18 @@ import {
 } from '../src/collaboration/textOperation.js';
 
 describe('parseOperation', () => {
+  it("refuse une opération qui dépasse le nombre maximal de composants", () => {
+    const alternatingComponents = (componentCount) =>
+      Array.from({ length: componentCount }, (_, componentIndex) =>
+        componentIndex % 2 === 0 ? { retain: 1 } : { insert: 'a' },
+      );
+
+    expect(() => parseOperation(alternatingComponents(MAX_OPERATION_COMPONENTS + 1))).toThrow(
+      `Une opération ne doit pas dépasser ${MAX_OPERATION_COMPONENTS} composants`,
+    );
+    expect(parseOperation(alternatingComponents(MAX_OPERATION_COMPONENTS))).toHaveLength(MAX_OPERATION_COMPONENTS);
+  });
+
   it("refuse une opération qui n'est pas une liste", () => {
     expect(() => parseOperation('retain:5')).toThrow(InvalidOperationError);
     expect(() => parseOperation({ retain: 5 })).toThrow(InvalidOperationError);

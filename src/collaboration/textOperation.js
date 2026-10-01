@@ -1,5 +1,7 @@
 export class InvalidOperationError extends Error {}
 
+export const MAX_OPERATION_COMPONENTS = 1000;
+
 function isRetain(component) {
   return component?.retain !== undefined;
 }
@@ -85,6 +87,9 @@ function createOperationBuilder() {
 export function parseOperation(rawOperation) {
   if (!Array.isArray(rawOperation)) {
     throw new InvalidOperationError("L'opération doit être une liste de composants");
+  }
+  if (rawOperation.length > MAX_OPERATION_COMPONENTS) {
+    throw new InvalidOperationError(`Une opération ne doit pas dépasser ${MAX_OPERATION_COMPONENTS} composants`);
   }
 
   const operationBuilder = createOperationBuilder();

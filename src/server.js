@@ -2,14 +2,19 @@ import 'dotenv/config';
 import { app } from './app.js';
 import { createCollaboration } from './collaboration/collaborationServer.js';
 import { ensureAdminAccount } from './database/ensureAdminAccount.js';
+import { checkClientUrl, checkTrustProxy } from './config/environment.js';
 import { pool } from './db.js';
 import { checkEncryptionKey } from './lib/encryption.js';
+import { createGracefulShutdown } from './lib/gracefulShutdown.js';
 import { checkJwtSecret } from './lib/jwt.js';
 
 const SHUTDOWN_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGUSR2'];
+const SHUTDOWN_TIMEOUT_MS = 10_000;
 
 checkJwtSecret();
 checkEncryptionKey();
+checkClientUrl();
+checkTrustProxy();
 
 const PORT = process.env.PORT || 3000;
 
@@ -39,22 +44,12 @@ const httpServer = app.listen(PORT, async () => {
 const collaboration = createCollaboration();
 collaboration.attachToHttpServer(httpServer);
 
-let isShuttingDown = false;
-
-async function shutDown(signal) {
-  if (isShuttingDown) {
-    return;
-  }
-  isShuttingDown = true;
-  console.log(`Signal ${signal} reçu : sauvegarde des documents ouverts avant l'arrêt`);
-  try {
-    await collaboration.close();
-    await pool.end();
-  } catch (error) {
-    console.error("Arrêt propre de l'API impossible :", error.message);
-  }
-  process.exit(0);
-}
+const shutDown = createGracefulShutdown({
+  httpServer,
+  collaboration,
+  pool,
+  timeoutMs: SHUTDOWN_TIMEOUT_MS,
+});
 
 for (const shutdownSignal of SHUTDOWN_SIGNALS) {
   process.once(shutdownSignal, () => shutDown(shutdownSignal));
