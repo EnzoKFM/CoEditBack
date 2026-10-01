@@ -273,9 +273,9 @@ Un `message` vaut `{ id, author: { userId, name }, text, sentAt }`.
 - Un message fait de 1 à 1 000 caractères (espaces de début et de fin retirés). Au-delà de 10 messages en 10 secondes par utilisateur : `{ error: 'Trop de messages envoyés : réessayez dans quelques secondes' }`.
 - Côté front, afficher le texte comme du texte brut, sans mise en forme.
 
-## Appels audio (WebRTC)
+## Appels audio et vidéo (WebRTC)
 
-Les collaborateurs d'un même document peuvent s'appeler, jusqu'à 6 personnes par appel. Chaque participant ouvre une connexion WebRTC directe avec chacun des autres (maillage). L'audio circule directement entre les navigateurs via WebRTC : le serveur ne sert que de signalisation, sur la même connexion Socket.IO que la collaboration, et ne voit jamais passer le son.
+Les collaborateurs d'un même document peuvent s'appeler, jusqu'à 12 personnes par appel, dont 6 caméras allumées en même temps. Chaque participant ouvre une connexion WebRTC directe avec chacun des autres (maillage). L'audio circule directement entre les navigateurs via WebRTC : le serveur ne sert que de signalisation, sur la même connexion Socket.IO que la collaboration, et ne voit jamais passer le son.
 
 ### Événements
 
@@ -285,27 +285,31 @@ Les collaborateurs d'un même document peuvent s'appeler, jusqu'à 6 personnes p
 | client → serveur | `call:accept` (ack) | `{ callId }` → `{ callId, participants: [{ clientId, user }] }` ou `{ error }` |
 | client → serveur | `call:signal` | `{ targetClientId, description: { type, sdp } }` ou `{ targetClientId, candidate: { candidate, sdpMid, sdpMLineIndex, usernameFragment } }` |
 | client → serveur | `call:mute` | `{ muted }` (booléen) |
+| client → serveur | `call:camera` (ack) | `{ enabled }` (booléen) → `{ enabled }` ou `{ error }` |
 | client → serveur | `call:hangup` | |
 | serveur → client | `call:incoming` | `{ callId, caller: { clientId, user } }` |
 | serveur → client | `call:accepted` | `{ callId, clientId }` |
 | serveur → client | `call:signal` | `{ clientId, description }` ou `{ clientId, candidate }` |
 | serveur → client | `call:mute` | `{ clientId, muted }` |
+| serveur → client | `call:camera` | `{ clientId, enabled }` |
 | serveur → client | `call:left` | `{ callId, clientId, reason: 'declined' \| 'hangup' }` |
 | serveur → client | `call:ended` | `{ callId, reason: 'declined' \| 'hangup' }` |
 
-- `targetClientId` est le `clientId` d'un collaborateur reçu dans `collaborators` ou `presence:update`. L'invitation est refusée si la cible n'est pas sur le même document, si elle est déjà dans un appel (sonnerie comprise), si l'on s'appelle soi-même, si l'on a soi-même un appel en attente de réponse ou si l'appel compte déjà 6 personnes (invitations en attente comprises).
+- `targetClientId` est le `clientId` d'un collaborateur reçu dans `collaborators` ou `presence:update`. L'invitation est refusée si la cible n'est pas sur le même document, si elle est déjà dans un appel (sonnerie comprise), si l'on s'appelle soi-même, si l'on a soi-même un appel en attente de réponse ou si l'appel compte déjà 12 personnes (invitations en attente comprises).
 - Sans appel en cours, `call:invite` crée un appel ; pendant un appel, n'importe quel participant peut inviter une personne de plus dans le même appel (même `callId`).
 - Un client ne participe qu'à un appel à la fois. `call:hangup` refuse un appel entrant (`reason: 'declined'`) ou quitte l'appel (`reason: 'hangup'`). Les participants restants reçoivent `call:left` ; l'appel s'arrête (`call:ended` pour les personnes restantes) quand il n'a plus de participant, ou qu'il n'en reste qu'un sans invitation en attente.
 - Quitter le document (`document:leave`, `document:join` d'un autre fichier, déconnexion) raccroche automatiquement.
 - `call:signal` n'est relayé qu'entre deux participants d'un même appel, ayant accepté ; un signal invalide ou hors appel est ignoré. `description.type` vaut `offer` ou `answer`.
 - `call:mute` informe les autres participants que l'on a coupé ou réactivé son micro : un micro coupé envoie du silence, que le navigateur qui reçoit l'audio ne peut pas distinguer d'un silence normal. Le serveur retrouve lui-même l'appel et relaie aux autres participants ; avant l'acceptation, ou si `muted` n'est pas un booléen, l'événement est ignoré.
+- `call:camera` annonce qu'un participant allume ou coupe sa caméra : l'appel démarre micro seul. Le serveur retient les caméras allumées de chaque appel et refuse d'en allumer une septième (`{ error: '6 caméras sont déjà allumées dans cet appel' }`) ; la place se libère quand la caméra est coupée ou que la personne quitte l'appel. Le client demande la place avant d'allumer sa caméra. L'événement est refusé hors d'un appel accepté ou si `enabled` n'est pas un booléen, et ignoré sans accusé. La vidéo, comme l'audio, circule directement entre les navigateurs.
 
 ### Algorithme côté front
 
 1. Un participant envoie `call:invite` ; la personne invitée reçoit `call:incoming` et répond par `call:accept` ou `call:hangup`.
-2. En acceptant, elle reçoit dans l'accusé la liste `participants`. Pour chacun, elle crée un `RTCPeerConnection`, y ajoute la piste micro (`getUserMedia({ audio: true })`), puis envoie `createOffer()` en `call:signal { targetClientId, description }`. C'est toujours le nouvel arrivant qui fait l'offre, ce qui évite deux offres croisées.
+2. En acceptant, elle reçoit dans l'accusé la liste `participants`. Pour chacun, elle crée un `RTCPeerConnection`, y ajoute la piste micro (`getUserMedia({ audio: true })`) et un emplacement vidéo (`addTransceiver('video')`), puis envoie `createOffer()` en `call:signal { targetClientId, description }`. C'est toujours le nouvel arrivant qui fait l'offre, ce qui évite deux offres croisées.
 3. Les participants déjà présents reçoivent `call:accepted`, créent un `RTCPeerConnection` pour le nouvel arrivant avec leur piste micro, et répondent à son offre par `createAnswer()`.
 4. Chaque `icecandidate` local part en `call:signal { candidate }` vers le pair concerné ; chaque candidat reçu est passé à `addIceCandidate`. Chaque piste distante (`track`) est branchée sur son propre élément `<audio autoplay>`.
-5. À `call:left`, fermer la connexion avec ce participant. À `call:ended` ou en raccrochant : fermer toutes les connexions et arrêter les pistes micro.
+5. Pour allumer ou couper la caméra, brancher ou retirer la piste caméra sur l'emplacement vidéo de chaque connexion (`RTCRtpSender.replaceTrack`), sans renégociation, après l'accord du serveur sur `call:camera`. Le débit vidéo de chaque connexion est plafonné selon le nombre de participants, et selon le débit montant estimé par le navigateur (`getStats`, `availableOutgoingBitrate`), partagé entre les flux vidéo envoyés.
+6. À `call:left`, fermer la connexion avec ce participant. À `call:ended` ou en raccrochant : fermer toutes les connexions et arrêter les pistes micro.
 
 Le `RTCPeerConnection` doit être configuré avec au moins un serveur STUN (par exemple `stun:stun.l.google.com:19302`) ; un serveur TURN sera nécessaire derrière les réseaux qui bloquent le pair-à-pair.

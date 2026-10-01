@@ -828,20 +828,79 @@ describe('appel audio', () => {
     expect(await muteReceivedByCarla).toEqual({ clientId: alice.clientId, muted: true });
   });
 
-  it('refuse une invitation au-delà de six personnes dans un appel', async () => {
-    const createdFile = (await createFile('appel-complet-six.txt', null, 'contenu')).body;
-    const clients = [];
-    for (let clientIndex = 0; clientIndex < 7; clientIndex += 1) {
-      clients.push(await createConnectedClient(createdFile.id, { name: `Personne ${clientIndex}` }));
+  it("relaie l'état de la caméra à tous les autres participants de l'appel", async () => {
+    const { alice, bob, carla } = await startGroupCall('appel-groupe-camera.txt');
+
+    const cameraReceivedByBob = waitForEvent(bob.socket, 'call:camera');
+    const cameraReceivedByCarla = waitForEvent(carla.socket, 'call:camera');
+    const cameraAcknowledgement = await alice.socket.emitWithAck('call:camera', { enabled: true });
+
+    expect(cameraAcknowledgement).toEqual({ enabled: true });
+    expect(await cameraReceivedByBob).toEqual({ clientId: alice.clientId, enabled: true });
+    expect(await cameraReceivedByCarla).toEqual({ clientId: alice.clientId, enabled: true });
+  });
+
+  it("refuse l'état de la caméra hors d'un appel accepté ou s'il est invalide", async () => {
+    const createdFile = (await createFile('camera-refus.txt', null, 'contenu')).body;
+    const caller = await createConnectedClient(createdFile.id, { name: 'Alice' });
+    const callee = await createConnectedClient(createdFile.id, { name: 'Bob' });
+    const cameraReceivedByCallee = vi.fn();
+    callee.socket.on('call:camera', cameraReceivedByCallee);
+
+    const acknowledgementWithoutCall = await caller.socket.emitWithAck('call:camera', { enabled: true });
+    const inviteAcknowledgement = await inviteCall(caller.socket, callee.clientId);
+    const acknowledgementFromInvitee = await callee.socket.emitWithAck('call:camera', { enabled: true });
+    await acceptCall(callee.socket, inviteAcknowledgement.callId);
+    const acknowledgementWithInvalidState = await caller.socket.emitWithAck('call:camera', { enabled: 'oui' });
+    caller.socket.emit('call:camera', { enabled: true });
+    await caller.socket.emitWithAck('chat:history');
+    await callee.socket.emitWithAck('chat:history');
+
+    expect(acknowledgementWithoutCall.error).toBe("Vous n'êtes dans aucun appel");
+    expect(acknowledgementFromInvitee.error).toBe("Vous n'êtes dans aucun appel");
+    expect(acknowledgementWithInvalidState.error).toBe('État de la caméra invalide');
+    expect(cameraReceivedByCallee).not.toHaveBeenCalled();
+  });
+
+  async function startCallWithGuests(fileName, guestCount) {
+    const createdFile = (await createFile(fileName, null, 'contenu')).body;
+    const host = await createConnectedClient(createdFile.id, { name: 'Hôte' });
+    const guests = [];
+    for (let guestIndex = 0; guestIndex < guestCount; guestIndex += 1) {
+      const guest = await createConnectedClient(createdFile.id, { name: `Invité ${guestIndex}` });
+      await addToCall(host, guest);
+      guests.push(guest);
     }
-    const [host, ...guests] = clients;
-    for (const guest of guests.slice(0, 5)) {
-      expect((await inviteCall(host.socket, guest.clientId)).error).toBeUndefined();
+    return { createdFile, host, guests };
+  }
+
+  it('refuse une invitation au-delà de douze personnes dans un appel', async () => {
+    const { createdFile, host } = await startCallWithGuests('appel-complet-douze.txt', 11);
+    const extraPerson = await createConnectedClient(createdFile.id, { name: 'En trop' });
+
+    const inviteAcknowledgement = await inviteCall(host.socket, extraPerson.clientId);
+
+    expect(inviteAcknowledgement.error).toBe("L'appel est complet (12 personnes maximum)");
+  });
+
+  it('refuse une septième caméra allumée et libère la place quand une caméra se coupe ou quitte', async () => {
+    const { host, guests } = await startCallWithGuests('appel-cameras.txt', 7);
+    for (const guest of guests.slice(0, 6)) {
+      expect(await guest.socket.emitWithAck('call:camera', { enabled: true })).toEqual({ enabled: true });
     }
 
-    const inviteAcknowledgement = await inviteCall(host.socket, guests[5].clientId);
+    expect((await host.socket.emitWithAck('call:camera', { enabled: true })).error).toBe(
+      '6 caméras sont déjà allumées dans cet appel',
+    );
+    expect(await guests[0].socket.emitWithAck('call:camera', { enabled: true })).toEqual({ enabled: true });
 
-    expect(inviteAcknowledgement.error).toBe("L'appel est complet (6 personnes maximum)");
+    await guests[0].socket.emitWithAck('call:camera', { enabled: false });
+    expect(await host.socket.emitWithAck('call:camera', { enabled: true })).toEqual({ enabled: true });
+
+    const leftReceivedByHost = waitForEvent(host.socket, 'call:left');
+    guests[1].socket.emit('call:hangup');
+    await leftReceivedByHost;
+    expect(await guests[6].socket.emitWithAck('call:camera', { enabled: true })).toEqual({ enabled: true });
   });
 
   it('ne relaie pas les signaux entre deux appels différents', async () => {
