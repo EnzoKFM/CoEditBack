@@ -1,1 +1,330 @@
 # CoEditBack
+
+API de CoEdit : authentification, stockage de documents texte rangés dans une arborescence de dossiers, co-édition de ces documents en temps réel et appels audio entre collaborateurs.
+
+## Démarrage (Docker)
+
+Le back et MySQL 8.4 tournent dans Docker ; le front tourne sur l'hôte.
+
+```bash
+cp .env.example .env   # renseigner au moins DB_PASSWORD, JWT_SECRET, TOTP_ENCRYPTION_KEY, ADMIN_EMAIL et ADMIN_PASSWORD
+docker compose up -d --build
+```
+
+- API : http://localhost:3000 (`GET /api/health`).
+- MySQL est exposé sur `127.0.0.1` uniquement, port `DB_EXPOSED_PORT` (3306 par défaut). Le schéma `sql/schema.sql` est appliqué automatiquement au premier démarrage du volume.
+- phpMyAdmin (profil `dev`, lancé avec `docker compose --profile dev up -d`) : http://localhost:8080 (`PHPMYADMIN_PORT`), pour consulter et modifier la base. Se connecter avec l'utilisateur `root` et le mot de passe `DB_PASSWORD` du `.env`. Il n'est accessible que depuis la machine qui fait tourner Docker (ni depuis le réseau local, ni via ngrok) : il donne un accès complet à la base.
+- `src/`, `sql/` et `tests/` sont montés dans le conteneur ; `nodemon` recharge l'API à chaque modification.
+
+Réappliquer le schéma (idempotent) : `docker compose exec back npm run db:init`. **À faire si le volume MySQL existait avant l'ajout de la table `users`** : le schéma n'est appliqué automatiquement qu'à la création du volume.
+
+Premier administrateur : au démarrage, s'il n'existe aucun compte `admin`, l'API en crée un à partir de `ADMIN_EMAIL` et `ADMIN_PASSWORD` (mot de passe soumis aux règles habituelles). Le schéma ne crée plus aucun compte : sur un volume antérieur, supprimer `admin@coedit.local` ou changer son mot de passe à la main.
+
+Arrêt : sur `SIGTERM`, `SIGINT` ou `SIGUSR2` (dont le redémarrage de nodemon), l'API sauvegarde les documents ouverts avant de s'arrêter.
+
+## Tests
+
+```bash
+docker compose exec back npm test
+```
+
+Les tests d'intégration utilisent une base dédiée (`DB_TEST_NAME`, `coedit_test` par défaut), créée automatiquement et vidée avant chaque test. Elle doit être différente de `DB_NAME`.
+
+## Variables d'environnement
+
+| Variable | Rôle |
+|---|---|
+| `PORT` | Port de l'API (3000) |
+| `CLIENT_URL` | Origine autorisée par CORS (front), **obligatoire** : origine http(s) sans chemin ni slash final, sinon l'API refuse de démarrer |
+| `NODE_ENV` | `development` en local ; `production` ajoute l'attribut `Secure` aux cookies (HTTPS obligatoire) |
+| `TRUST_PROXY` | Nombre de reverse proxies devant l'API, entier supérieur ou égal à 0 (l'API refuse de démarrer sinon ; ex. `1` derrière Traefik ou Nginx, `2` pour un test à plusieurs via ngrok + le proxy de Vite, voir le README du front), vide sinon. Sans lui derrière un proxy, tous les visiteurs partagent la même IP pour la limitation des tentatives. Ne pas le renseigner sans proxy : un client pourrait alors falsifier son IP via l'en-tête `X-Forwarded-For` |
+| `JWT_SECRET` | Clé de signature des sessions, **obligatoire, au moins 32 caractères**, propre à chaque environnement |
+| `TOTP_ENCRYPTION_KEY` | Clé de chiffrement des secrets 2FA, **obligatoire, 64 caractères hexadécimaux**. La changer rend inutilisables les 2FA déjà activées |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | Premier administrateur, créé au démarrage s'il n'en existe aucun ; ignorées ensuite |
+| `DB_HOST`, `DB_PORT`, `DB_USER` | Connexion MySQL (forcées par `docker-compose.yml` dans le conteneur) |
+| `DB_PASSWORD` | Mot de passe MySQL, **obligatoire** : `docker compose` refuse de démarrer sans lui. Il sert aussi de mot de passe `root` à la création du volume |
+| `DB_NAME` | Base applicative |
+| `DB_TEST_NAME` | Base des tests |
+| `DB_EXPOSED_PORT` | Port MySQL publié sur l'hôte |
+| `PHPMYADMIN_PORT` | Port de phpMyAdmin sur l'hôte (8080 par défaut) |
+| `USER_STORAGE_QUOTA_BYTES` | Quota de fichiers binaires par propriétaire, en octets (500 Mo par défaut) |
+
+## Modèle de données
+
+- `users` : comptes (`role` = `user` | `admin`), mot de passe haché avec bcrypt. `is_blocked` empêche la connexion et la navigation sur le site; `token_version` invalide les sessions ouvertes quand il est incrémenté (déconnexion, changement de mot de passe). 2FA : `totp_secret` (chiffré en AES-256-GCM, jamais en clair), `totp_enabled`, et `totp_last_time_step` (dernier créneau de 30 s accepté, pour qu'un code ne serve qu'une fois).
+- `nodes` : dossiers et fichiers (`type` = `folder` | `file`), rattachés à leur parent par `parent_id` (`NULL` = racine). Deux éléments d'un même dossier ne peuvent pas porter le même nom (comparaison insensible à la casse, sensible aux accents) ; à la racine, l'unicité vaut par propriétaire (colonne générée `root_owner_key`). `owner_id` est le propriétaire : l'utilisateur qui crée un élément à la racine, puis le propriétaire du dossier parent pour tout élément créé dedans, y compris par un invité. Il est remis à `NULL` si le compte est supprimé, et l'élément n'est alors plus accessible qu'aux administrateurs. `created_by` est l'utilisateur qui a créé l'élément (qui peut être un invité, contrairement à `owner_id`) et `updated_by` le dernier à l'avoir modifié (création, renommage, déplacement, ou édition du contenu en direct) ; tous deux passent à `NULL` si le compte est supprimé.
+- `folder_shares` : partages d'un dossier avec un utilisateur (`folder_id`, `user_id`, `permission` = `read` | `write` | `delete`), supprimés avec le dossier ou le compte.
+- `file_contents` : texte du document (`content`), `revision` (nombre d'opérations appliquées, voir la collaboration) et `version` (incrémentée à chaque sauvegarde).
+- `file_binaries` : contenu d'un fichier binaire (PDF, image…) : `mime_type`, octets (`data`, `LONGBLOB`), `size` en octets et `version` (incrémentée à chaque remplacement). Un fichier a soit une ligne `file_contents` (document texte co-édité), soit une ligne `file_binaries`. Table ajoutée après coup : sur une base existante, rejouer `npm run db:init` (le schéma ne crée que les tables absentes).
+
+## API
+
+Toutes les erreurs renvoient `{ "error": "message" }` : 400 (requête invalide), 401 (non authentifié), 403 (accès refusé), 404 (élément introuvable), 409 (conflit de nom ou de version), 413 (corps JSON > 5 Mo, fichier binaire > 20 Mo, quota de stockage dépassé), 429 (trop de tentatives).
+
+### Authentification
+
+La session est un JWT placé dans un cookie `token` (`HttpOnly`, `SameSite=Strict`, 8 h), illisible par le JavaScript du front. Le front doit envoyer ses requêtes avec `credentials: 'include'` et appeler `GET /api/auth/me` au chargement pour savoir si l'utilisateur est connecté.
+
+| Méthode | Route | Corps | Réponse |
+|---|---|---|---|
+| POST | `/api/auth/login` | `{ email, password }` | `{ user }` + cookie ; si 2FA active : `{ twoFactorRequired: true }` ; 401 identifiants incorrects, 403 compte bloqué |
+| POST | `/api/auth/login/2fa` | `{ code }` | `{ user }` + cookie ; 401 code incorrect ou délai de 5 min dépassé |
+| POST | `/api/auth/logout` | | 204 ; cookie supprimé et **toutes les sessions de l'utilisateur révoquées** (`token_version` + 1), sur tous ses appareils |
+| GET | `/api/auth/me` | | `{ user }` ; 401 sans session valide |
+
+`user` vaut `{ id, email, firstName, lastName, role, totpEnabled }`.
+
+Limitation des tentatives (seuls les échecs comptent, fenêtre de 15 minutes, puis 429) :
+
+| Route | Limite |
+|---|---|
+| `/login` | 20 échecs par IP, et 10 échecs par compte (email), quelle que soit l'IP |
+| `/login/2fa` | 10 échecs par IP, et 10 échecs par compte (identifiant du cookie `pending_2fa`), quelle que soit l'IP |
+| `/2fa/setup`, `/2fa/enable`, `/2fa/disable`, `PATCH /api/users/me`, `/api/users/me/password` | 10 échecs par utilisateur connecté |
+
+La limite par compte bloque aussi son propriétaire pendant 15 minutes : c'est la contrepartie de la protection contre une attaque répartie sur plusieurs IP. En développement, redémarrer l'API (`rs` dans nodemon) remet les compteurs à zéro.
+
+### Double authentification (TOTP)
+
+Compatible Google Authenticator, Authy, Microsoft Authenticator… Routes réservées à l'utilisateur connecté :
+
+| Méthode | Route | Corps | Réponse |
+|---|---|---|---|
+| POST | `/api/users/me/2fa/setup` | `{ password }` | `{ qrCode, secret }` : QR code (data URL pour un `<img>`) et secret pour une saisie manuelle. La 2FA n'est pas encore active ; 400 si le mot de passe est incorrect, 409 si la 2FA est déjà active |
+| POST | `/api/users/me/2fa/enable` | `{ code }` | `{ user }` ; active la 2FA si le code est valide, 400 sinon |
+| POST | `/api/users/me/2fa/disable` | `{ password, code }` | `{ user }` ; 400 si le mot de passe ou le code est incorrect |
+
+Connexion d'un compte avec 2FA : `/login` vérifie le mot de passe et pose un cookie temporaire `pending_2fa` (5 min), qui n'ouvre pas de session ; `/login/2fa` vérifie le code et pose le vrai cookie de session. Le cookie temporaire devient invalide si les sessions de l'utilisateur sont révoquées entre-temps. Le code est accepté avec une tolérance de 30 s, les espaces sont ignorés, et **un code ne sert qu'une fois** (connexion, activation et désactivation confondues).
+
+Pour protéger une route : `requireAuth` (401 si non connecté, expose `request.user`) et `requireAdmin` (403 si non admin), dans `src/middlewares/auth.js`. Un compte bloqué perd sa session dès la requête suivante.
+
+### Profil
+
+Routes réservées à l'utilisateur connecté :
+
+| Méthode | Route | Corps | Réponse |
+|---|---|---|---|
+| PATCH | `/api/users/me` | `{ firstName?, lastName?, email?, currentPassword? }` | `{ user }` ; au moins un champ. `currentPassword` est obligatoire pour changer l'email (identifiant de connexion). 400 si invalide ou mot de passe incorrect, 409 si l'email est déjà utilisé |
+| PATCH | `/api/users/me/password` | `{ currentPassword, newPassword }` | `{ user }` + nouveau cookie ; toutes les autres sessions sont révoquées. 400 si le mot de passe actuel est incorrect ou si le nouveau est trop faible |
+
+Un nouveau mot de passe doit contenir au moins 8 caractères, dont une minuscule, une majuscule, un chiffre et un caractère spécial.
+
+### Administration des comptes
+
+Il n'y a pas d'inscription publique : les comptes sont créés par un administrateur. Routes réservées aux admins (401 sans session, 403 pour un non-admin) :
+
+| Méthode | Route | Corps | Réponse |
+|---|---|---|---|
+| GET | `/api/admin/users` | | `{ users }`, triés par nom |
+| POST | `/api/admin/users` | `{ email, firstName, lastName, password, role? }` | 201 + `{ user }` ; `role` vaut `user` (défaut) ou `admin`. 409 si l'email est déjà utilisé |
+| PATCH | `/api/admin/users/:userId/block` | | `{ user }` ; la session du compte est coupée immédiatement et il ne peut plus se connecter (403). 400 pour son propre compte, 404 si introuvable |
+| PATCH | `/api/admin/users/:userId/unblock` | | `{ user }` |
+
+Un `user` vu par un admin contient en plus `isBlocked` et `createdAt`.
+
+### Documents
+
+Toutes les routes de documents exigent une session (401 sinon). Un élément auquel l'utilisateur n'a pas accès se comporte comme un élément inexistant (404, ou 400 pour un dossier parent) ; un droit insuffisant sur un élément visible renvoie 403.
+
+| Méthode | Route | Corps | Réponse |
+|---|---|---|---|
+| GET | `/api/folders/root/children` | | Contenu de la racine de l'utilisateur connecté |
+| GET | `/api/folders/:folderId/children` | | Contenu d'un dossier |
+| POST | `/api/nodes` | `{ parentId, type, name, content? }` | 201 + élément créé ; `write` requis sur le dossier parent |
+| GET | `/api/nodes/:nodeId` | | Métadonnées de l'élément : `{ id, parentId, type, name, ownerId, permission, mimeType, permission, createdAt, createdBy, updatedAt, updatedBy }` |
+| PATCH | `/api/nodes/:nodeId` | `{ name?, parentId? }` | Élément renommé et/ou déplacé |
+| DELETE | `/api/nodes/:nodeId` | | 204, descendants compris |
+| GET | `/api/files/:fileId/content` | | `{ content, version, updatedAt }` ; 400 sur un fichier binaire |
+| POST | `/api/files` | multipart : `file`, `parentId?`, `name?` | 201 + fichier binaire créé ; `write` requis sur le dossier parent |
+| GET | `/api/files/:fileId/binary` | | Octets du fichier binaire ; 400 sur un document texte |
+| PUT | `/api/files/:fileId/binary` | multipart : `file` | Fichier binaire remplacé ; `write` requis, 400 sur un document texte |
+
+### Droits et partage
+
+Chaque utilisateur ne voit que sa racine et les dossiers partagés avec lui. Les administrateurs ont tous les droits sur tous les éléments, orphelins compris, et leur racine liste les éléments racine de tous les utilisateurs. Le propriétaire a tous les droits sur ses éléments ; il peut partager un dossier (pas un fichier) avec un autre compte, désigné par son email, qui y accède immédiatement. La permission s'applique à tout le contenu du dossier, sous-dossiers compris ; si plusieurs partages se superposent, la plus élevée l'emporte.
+
+| `permission` | Autorise |
+|---|---|
+| `read` | Lister, lire les métadonnées et le contenu, rejoindre un document en lecture seule |
+| `write` | + créer des éléments, renommer, éditer le contenu en temps réel, remplacer un fichier binaire |
+| `delete` | + supprimer et déplacer |
+
+Le dossier partagé lui-même ne peut être renommé, déplacé ou supprimé que par son propriétaire. Un élément ne peut pas être déplacé vers l'espace d'un autre propriétaire (400). `permission` vaut `owner` dans les réponses pour le propriétaire et pour un administrateur.
+
+| Méthode | Route | Corps | Réponse |
+|---|---|---|---|
+| GET | `/api/folders/shared` | | `{ folders }` : dossiers partagés avec l'utilisateur connecté, `{ id, name, type, childrenCount, updatedAt, permission, owner: { id, email, firstName, lastName } }` |
+| GET | `/api/folders/:folderId/shares` | | `{ shares }` : `{ userId, email, firstName, lastName, permission, createdAt, updatedAt }` ; propriétaire ou administrateur (403 sinon) |
+| POST | `/api/folders/:folderId/shares` | `{ email, permission }` | 201 + partage ; 404 aucun compte pour cet email, 400 partage avec le propriétaire du dossier ou sur un fichier, 409 déjà partagé |
+| PATCH | `/api/folders/:folderId/shares/:userId` | `{ permission }` | Partage modifié ; propriétaire ou administrateur |
+| DELETE | `/api/folders/:folderId/shares/:userId` | | 204 ; par le propriétaire, un administrateur, ou l'invité lui-même pour quitter le partage |
+
+### Listage d'un dossier
+
+```json
+{
+  "folder": { "id": 4, "name": "Cours", "parentId": 1, "permission": "owner" },
+  "breadcrumb": [{ "id": 1, "name": "Projets" }, { "id": 4, "name": "Cours" }],
+  "children": [
+    {
+      "id": 7, "name": "TP", "type": "folder", "childrenCount": 3,
+      "createdAt": "2026-09-27T09:00:00.000Z", "createdBy": { "id": 1, "name": "Alice Martin" },
+      "updatedAt": "2026-09-28T10:00:00.000Z", "updatedBy": { "id": 1, "name": "Alice Martin" }
+    },
+    {
+      "id": 9, "name": "notes.txt", "type": "file", "size": 1204, "mimeType": null,
+      "createdAt": "2026-09-27T09:05:00.000Z", "createdBy": { "id": 1, "name": "Alice Martin" },
+      "updatedAt": "2026-09-28T10:05:00.000Z", "updatedBy": { "id": 2, "name": "Bob Durand" }
+    },
+    {
+      "id": 12, "name": "plan.pdf", "type": "file", "size": 482133, "mimeType": "application/pdf",
+      "createdAt": "2026-09-27T09:05:00.000Z", "createdBy": { "id": 1, "name": "Alice Martin" },
+      "updatedAt": "2026-09-28T10:05:00.000Z", "updatedBy": { "id": 2, "name": "Bob Durand" }
+    }
+  ]
+}
+```
+
+`createdBy` et `updatedBy` valent `{ id, name }`, ou `null` si le compte a été supprimé. `updatedAt` et `updatedBy` suivent aussi les éditions en direct : ils sont mis à jour à chaque sauvegarde automatique, avec l'auteur de la dernière opération appliquée.
+
+
+À la racine, `folder` vaut `null` et `breadcrumb` est vide. Pour un fichier, `size` compte les caractères d'un document texte et les octets d'un fichier binaire ; `mimeType` vaut `null` pour un document texte et le type MIME d'un fichier binaire. Les dossiers sont listés avant les fichiers, puis par nom. Pour un invité, `breadcrumb` commence au dossier partagé et `folder.parentId` vaut `null` sur ce dossier, pour ne pas exposer l'arborescence du propriétaire.
+
+### Déplacement
+
+`parentId: null` déplace l'élément à la racine (celle de son propriétaire quand c'est un administrateur qui déplace l'élément d'autrui). Un dossier ne peut pas être déplacé dans lui-même ni dans un de ses sous-dossiers (400). Les déplacements d'un même arbre sont sérialisés, si bien que deux déplacements croisés simultanés ne peuvent pas créer de cycle.
+
+L'arborescence est limitée à 100 niveaux, à la création comme au déplacement (400 au-delà). Un nom ne peut être ni `.` ni `..`, ni contenir `/`, des caractères de contrôle ou des caractères de contrôle bidirectionnel (qui permettraient de déguiser une extension).
+
+### Lecture du contenu
+
+`GET /api/files/:fileId/content` renvoie la dernière copie texte sauvegardée. Le contenu ne se modifie pas en REST : toute édition passe par la collaboration temps réel.
+
+### Fichiers binaires
+
+Les PDF, images et autres fichiers non co-édités s'envoient en `multipart/form-data` sur `POST /api/files` : champ `file` (obligatoire, 20 Mo maximum), `parentId` (à omettre pour la racine) et `name` (nom d'origine du fichier par défaut). Le type MIME déclaré est celui de la partie `file` ; s'il est absent ou illisible, c'est `text/plain`, le défaut du multipart (RFC 7578). Le serveur contrôle ensuite le contenu réel grâce à sa signature (bibliothèque `file-type`) : si le type reconnu diffère du type déclaré, ou si le contenu ne porte pas la signature attendue d'un type qui en a une (un script renommé en `.png`, par exemple), l'envoi est refusé (400). Un type reconnu est enregistré à la place d'un `application/octet-stream` déclaré ; un contenu sans signature garde son type déclaré seulement si c'est `text/plain`, `text/csv`, `text/markdown` ou `application/json`, et est enregistré en `application/octet-stream` sinon (un HTML ou un SVG ne peut donc pas être resservi comme tel). La requête accepte au plus deux champs texte d'1 Ko, et chaque utilisateur est limité à 60 envois ou remplacements par quart d'heure (429 au-delà). Le total des fichiers binaires d'un propriétaire est plafonné par `USER_STORAGE_QUOTA_BYTES` (413 au-delà), y compris pour les fichiers envoyés par ses invités.
+
+`GET /api/files/:fileId/binary` renvoie les octets avec leur `Content-Type` et un `Content-Disposition: attachment` ; côté front, le charger avec `fetch` (`credentials: 'include'`) puis l'afficher via `URL.createObjectURL`. `PUT /api/files/:fileId/binary` remplace le contenu et le type MIME sans changer le nom (renommer avec `PATCH /api/nodes/:nodeId`). Un fichier binaire ne peut pas être rejoint en collaboration, et un document texte ne peut pas être remplacé par cette route.
+
+## Collaboration temps réel
+
+La synchronisation repose sur une transformation opérationnelle (OT) écrite pour le projet, sans Yjs. Le transport est [Socket.IO](https://socket.io), sur le même port que l'API (`http://localhost:3000`, chemin par défaut `/socket.io`). Le serveur fait autorité : il ordonne les opérations, les transforme, les applique, puis les diffuse.
+
+La connexion exige une session : le serveur lit le cookie `token` à l'ouverture et la refuse (`connect_error` « Non authentifié ») s'il est absent, invalide ou révoqué, ou si le compte est bloqué. Le front, qui n'est pas sur la même origine que l'API, doit ouvrir le socket avec `withCredentials: true` pour que le navigateur envoie le cookie. Un utilisateur ne peut avoir que 20 sockets simultanées : au-delà, la connexion est refusée (`connect_error` « Trop de connexions simultanées »).
+
+### Opérations
+
+Une opération décrit tout le document, dans l'ordre, sous forme d'une liste de composants :
+
+```js
+[{ retain: 6 }, { insert: 'cher ' }, { retain: 5 }, { delete: 3 }]
+```
+
+`retain` conserve des caractères, `insert` en ajoute, `delete` en supprime. La somme des `retain` et `delete` doit égaler la longueur du document de départ. Les positions sont comptées en unités UTF-16 (`string.length` en JavaScript). Le module [src/collaboration/textOperation.js](src/collaboration/textOperation.js), sans dépendance, peut être copié tel quel dans le front (`applyOperation`, `transformOperation`, `transformIndex`).
+
+### Événements
+
+| Sens | Événement | Contenu |
+|---|---|---|
+| client → serveur | `document:join` (ack) | `{ fileId, user: { name, color } }` → `{ clientId, permission, content, revision, collaborators }` ou `{ error }` |
+| client → serveur | `document:operation` (ack) | `{ revision, operation }` → `{ revision }` ou `{ error, isResyncRequired }` |
+| client → serveur | `presence:update` | `{ selection: { anchor, head } \| null, pointer: { x, y } \| null }` |
+| client → serveur | `document:leave` | |
+| serveur → clients | `document:operation` | `{ clientId, revision, operation }` |
+| serveur → client | `document:revoked` | `{ fileId }` : l'accès au document a été retiré, la socket l'a quitté |
+| serveur → client | `document:permission` | `{ fileId, permission }` : le droit d'écriture a changé |
+| serveur → clients | `presence:update` | `{ clientId, user, selection, pointer }` |
+| serveur → clients | `presence:leave` | `{ clientId }` |
+
+- `revision` est la révision du document sur laquelle l'opération a été écrite. Le serveur la transforme contre les opérations appliquées depuis, puis renvoie la nouvelle révision dans l'accusé.
+- Un fichier inexistant ou inaccessible, un dossier ou un identifiant invalide est refusé à `document:join`.
+- `document:operation` est refusée si `permission` vaut `read`. Le nom affiché des collaborateurs est celui de l'utilisateur connecté (le `name` envoyé à `document:join` est ignoré) et `color` doit être au format `#rgb` ou `#rrggbb`, sinon `null`.
+- **Les droits sont revalidés en continu** : à chaque changement de droits (blocage, changement de mot de passe, déconnexion des sessions, partage retiré ou modifié, nœud supprimé ou déplacé) puis toutes les 60 s (expiration du token comprise). Un utilisateur devenu invalide est déconnecté ; un document devenu inaccessible est quitté (`document:revoked`) ; une perte du droit d'écriture refuse les opérations suivantes (`document:permission`).
+- `isResyncRequired: true` signale une révision antérieure au chargement du document en mémoire (après une reconnexion par exemple) : il faut rejoindre à nouveau le document.
+- La présence n'est pas stockée. Le serveur transforme toutefois les sélections qu'il connaît à chaque opération, pour qu'un nouvel arrivant les reçoive à jour dans `collaborators`.
+
+### Algorithme côté front
+
+1. À l'ouverture, `document:join`, puis afficher `content` et mémoriser `revision`.
+2. Une modification locale est appliquée tout de suite. Si aucune opération n'attend d'accusé, l'envoyer avec `revision` ; sinon, la mettre en tampon.
+3. À l'accusé : `revision` prend la valeur reçue, et la première opération du tampon part à son tour.
+4. À la réception d'une `document:operation` d'un autre client : `[enAttente, reçue] = transformOperation(enAttente, reçue)`, puis même chose avec chaque opération du tampon dans l'ordre, puis appliquer `reçue` au texte et faire `revision = message.revision`. Les curseurs distants sont décalés avec `transformIndex`.
+
+### Sauvegarde
+
+Le serveur sauvegarde lui-même : 2 s après la dernière opération, au plus tard toutes les 10 s pendant une frappe continue, et tout de suite quand le dernier éditeur quitte le document. En cas d'échec, la révision n'est pas considérée comme sauvegardée : la sauvegarde est retentée et le document reste en mémoire tant que sa dernière révision n'est pas enregistrée. Le front n'a rien à enregistrer.
+
+### Limites
+
+- Une opération compte au plus 1 000 composants.
+- Un document ne peut pas dépasser 5 000 000 de caractères : l'opération qui le ferait dépasser est refusée (`{ error }`).
+- Le serveur garde en mémoire les 1 000 dernières opérations (1 000 000 de caractères au plus) de chaque document ; une opération écrite sur une révision plus ancienne reçoit `isResyncRequired: true`.
+- 100 messages par seconde et par utilisateur, tous événements confondus ; au-delà, le message est ignoré et son accusé reçoit `{ error: 'Trop de messages envoyés : réessayez dans un instant' }`.
+- Un message Socket.IO ne peut pas dépasser 1 Mo.
+
+## Messagerie instantanée
+
+Les collaborateurs d'un même document peuvent échanger des messages pendant la session d'édition, sur la même connexion Socket.IO. Il faut avoir rejoint le document (`document:join`), sinon `{ error: 'Aucun document rejoint' }`.
+
+| Sens | Événement | Contenu |
+|---|---|---|
+| client → serveur | `chat:send` (ack) | `{ text }` → `{ message }` ou `{ error }` |
+| client → serveur | `chat:history` (ack) | → `{ messages }` ou `{ error }` |
+| serveur → clients | `chat:message` | `message` |
+
+Un `message` vaut `{ id, author: { userId, name }, text, sentAt }`.
+
+- **L'auteur est fixé par le serveur** à partir de l'utilisateur connecté : le nom envoyé dans `document:join` n'est pas utilisé, on ne peut donc pas écrire au nom de quelqu'un d'autre.
+- `chat:message` est diffusé aux autres participants du document, pas à l'expéditeur : celui-ci reçoit son message dans l'accusé de `chat:send`.
+- **Les messages sont éphémères** : ils vivent en mémoire avec le document et disparaissent quand plus personne n'y travaille. `chat:history` donne à un nouvel arrivant les 50 derniers messages de la session en cours.
+- Un message fait de 1 à 1 000 caractères (espaces de début et de fin retirés). Au-delà de 10 messages en 10 secondes par utilisateur : `{ error: 'Trop de messages envoyés : réessayez dans quelques secondes' }`.
+- Côté front, afficher le texte comme du texte brut, sans mise en forme.
+
+## Appels audio et vidéo (WebRTC)
+
+Les collaborateurs d'un même document peuvent s'appeler, jusqu'à 12 personnes par appel, dont 6 caméras allumées en même temps. Chaque participant ouvre une connexion WebRTC directe avec chacun des autres (maillage). L'audio circule directement entre les navigateurs via WebRTC : le serveur ne sert que de signalisation, sur la même connexion Socket.IO que la collaboration, et ne voit jamais passer le son.
+
+### Événements
+
+| Sens | Événement | Contenu |
+|---|---|---|
+| client → serveur | `call:invite` (ack) | `{ targetClientId }` → `{ callId }` ou `{ error }` |
+| client → serveur | `call:accept` (ack) | `{ callId }` → `{ callId, participants: [{ clientId, user }] }` ou `{ error }` |
+| client → serveur | `call:signal` | `{ targetClientId, description: { type, sdp } }` ou `{ targetClientId, candidate: { candidate, sdpMid, sdpMLineIndex, usernameFragment } }` |
+| client → serveur | `call:mute` | `{ muted }` (booléen) |
+| client → serveur | `call:camera` (ack) | `{ enabled }` (booléen) → `{ enabled }` ou `{ error }` |
+| client → serveur | `call:hangup` | |
+| client → serveur | `call:status` (ack) | → `{ calls: [{ callId, participantClientIds }] }` ou `{ error }` |
+| client → serveur | `call:join-request` (ack) | `{ callId }` → `{ callId }` ou `{ error }` |
+| client → serveur | `call:join-decline` | `{ requesterClientId }` |
+| serveur → client | `call:incoming` | `{ callId, caller: { clientId, user } }` |
+| serveur → client | `call:accepted` | `{ callId, clientId }` |
+| serveur → client | `call:signal` | `{ clientId, description }` ou `{ clientId, candidate }` |
+| serveur → client | `call:mute` | `{ clientId, muted }` |
+| serveur → client | `call:camera` | `{ clientId, enabled }` |
+| serveur → client | `call:left` | `{ callId, clientId, reason: 'declined' \| 'hangup' }` |
+| serveur → client | `call:ended` | `{ callId, reason: 'declined' \| 'hangup' }` |
+| serveur → client | `call:status` | `{ calls: [{ callId, participantClientIds }] }` |
+| serveur → client | `call:join-request` | `{ callId, requester: { clientId, user } }` |
+| serveur → client | `call:join-declined` | `{ callId, requesterClientId }` |
+
+- `targetClientId` est le `clientId` d'un collaborateur reçu dans `collaborators` ou `presence:update`. L'invitation est refusée si la cible n'est pas sur le même document, si elle est déjà dans un appel (sonnerie comprise), si l'on s'appelle soi-même, si l'on a soi-même un appel en attente de réponse ou si l'appel compte déjà 12 personnes (invitations en attente comprises).
+- Sans appel en cours, `call:invite` crée un appel ; pendant un appel, n'importe quel participant peut inviter une personne de plus dans le même appel (même `callId`).
+- Un client ne participe qu'à un appel à la fois. `call:hangup` refuse un appel entrant (`reason: 'declined'`) ou quitte l'appel (`reason: 'hangup'`). Les participants restants reçoivent `call:left` ; l'appel s'arrête (`call:ended` pour les personnes restantes) quand il n'a plus de participant, ou qu'il n'en reste qu'un sans invitation en attente.
+- Quitter le document (`document:leave`, `document:join` d'un autre fichier, déconnexion) raccroche automatiquement.
+- `call:status` donne les appels en cours du document, c'est-à-dire ceux qui réunissent au moins deux participants. Le serveur le rediffuse à toute la salle du document quand un participant entre dans un appel ou en sort.
+- Pour rejoindre un appel en cours, `call:join-request` transmet la demande à tous ses participants, avec l'identité du demandeur fixée par le serveur. Elle est refusée si le demandeur est déjà dans un appel (sonnerie comprise), si l'appel est inconnu, sur un autre document ou complet. Un participant l'accepte en invitant le demandeur (`call:invite`), dont le client accepte alors l'appel qu'il a demandé ; `call:join-decline` la refuse et prévient le demandeur et les autres participants par `call:join-declined`.
+- `call:signal` n'est relayé qu'entre deux participants d'un même appel, ayant accepté ; un signal invalide ou hors appel est ignoré. `description.type` vaut `offer` ou `answer`.
+- `call:mute` informe les autres participants que l'on a coupé ou réactivé son micro : un micro coupé envoie du silence, que le navigateur qui reçoit l'audio ne peut pas distinguer d'un silence normal. Le serveur retrouve lui-même l'appel et relaie aux autres participants ; avant l'acceptation, ou si `muted` n'est pas un booléen, l'événement est ignoré.
+- `call:camera` annonce qu'un participant allume ou coupe sa caméra : l'appel démarre micro seul. Le serveur retient les caméras allumées de chaque appel et refuse d'en allumer une septième (`{ error: '6 caméras sont déjà allumées dans cet appel' }`) ; la place se libère quand la caméra est coupée ou que la personne quitte l'appel. Le client demande la place avant d'allumer sa caméra. L'événement est refusé hors d'un appel accepté ou si `enabled` n'est pas un booléen, et ignoré sans accusé. La vidéo, comme l'audio, circule directement entre les navigateurs.
+
+### Algorithme côté front
+
+1. Un participant envoie `call:invite` ; la personne invitée reçoit `call:incoming` et répond par `call:accept` ou `call:hangup`.
+2. En acceptant, elle reçoit dans l'accusé la liste `participants`. Pour chacun, elle crée un `RTCPeerConnection`, y ajoute la piste micro (`getUserMedia({ audio: true })`) et un emplacement vidéo (`addTransceiver('video')`), puis envoie `createOffer()` en `call:signal { targetClientId, description }`. C'est toujours le nouvel arrivant qui fait l'offre, ce qui évite deux offres croisées.
+3. Les participants déjà présents reçoivent `call:accepted`, créent un `RTCPeerConnection` pour le nouvel arrivant avec leur piste micro, et répondent à son offre par `createAnswer()`.
+4. Chaque `icecandidate` local part en `call:signal { candidate }` vers le pair concerné ; chaque candidat reçu est passé à `addIceCandidate`. Chaque piste distante (`track`) est branchée sur son propre élément `<audio autoplay>`.
+5. Pour allumer ou couper la caméra, brancher ou retirer la piste caméra sur l'emplacement vidéo de chaque connexion (`RTCRtpSender.replaceTrack`), sans renégociation, après l'accord du serveur sur `call:camera`. Le débit vidéo de chaque connexion est plafonné selon le nombre de participants, et selon le débit montant estimé par le navigateur (`getStats`, `availableOutgoingBitrate`), partagé entre les flux vidéo envoyés.
+6. À `call:left`, fermer la connexion avec ce participant. À `call:ended` ou en raccrochant : fermer toutes les connexions et arrêter les pistes micro.
+
+Le `RTCPeerConnection` doit être configuré avec au moins un serveur STUN (par exemple `stun:stun.l.google.com:19302`) ; un serveur TURN sera nécessaire derrière les réseaux qui bloquent le pair-à-pair.

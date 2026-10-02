@@ -1,19 +1,24 @@
 import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
+import { app } from './app.js';
+import { createCollaboration } from './collaboration/collaborationServer.js';
+import { ensureAdminAccount } from './database/ensureAdminAccount.js';
+import { checkClientUrl, checkTrustProxy } from './config/environment.js';
 import { pool } from './db.js';
+import { checkEncryptionKey } from './lib/encryption.js';
+import { createGracefulShutdown } from './lib/gracefulShutdown.js';
+import { checkJwtSecret } from './lib/jwt.js';
 
-const app = express();
+const SHUTDOWN_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGUSR2'];
+const SHUTDOWN_TIMEOUT_MS = 10_000;
+
+checkJwtSecret();
+checkEncryptionKey();
+checkClientUrl();
+checkTrustProxy();
+
 const PORT = process.env.PORT || 3000;
 
-app.use(cors({ origin: process.env.CLIENT_URL }));
-app.use(express.json());
-
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
-
-app.listen(PORT, async () => {
+const httpServer = app.listen(PORT, async () => {
   console.log(`API démarrée sur http://localhost:${PORT}`);
 
   try {
@@ -22,4 +27,30 @@ app.listen(PORT, async () => {
   } catch (err) {
     console.error('Connexion MySQL impossible :', err.code || err.message);
   }
+
+  try {
+    const isAdminCreated = await ensureAdminAccount({
+      email: process.env.ADMIN_EMAIL,
+      password: process.env.ADMIN_PASSWORD,
+    });
+    if (isAdminCreated) {
+      console.log(`Compte administrateur ${process.env.ADMIN_EMAIL} créé`);
+    }
+  } catch (error) {
+    console.error('Création du compte administrateur impossible :', error.code || error.message);
+  }
 });
+
+const collaboration = createCollaboration();
+collaboration.attachToHttpServer(httpServer);
+
+const shutDown = createGracefulShutdown({
+  httpServer,
+  collaboration,
+  pool,
+  timeoutMs: SHUTDOWN_TIMEOUT_MS,
+});
+
+for (const shutdownSignal of SHUTDOWN_SIGNALS) {
+  process.once(shutdownSignal, () => shutDown(shutdownSignal));
+}
